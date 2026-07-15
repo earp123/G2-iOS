@@ -8,9 +8,9 @@ Target: **iOS 17.0+**, **Swift 6 strict concurrency**, zero third-party dependen
 ## 1. Repository layout
 
 ```
-Smart Air Monitor/
+G2-iOS/
 ├── App/                   Entry point, root view, theme
-│   ├── Smart_Air_MonitorApp.swift   DI switch (see §2)
+│   ├── G2_iOSApp.swift   DI switch (see §2)
 │   ├── RootView.swift
 │   └── Theme.swift
 ├── BLE/                   CoreBluetooth layer
@@ -48,7 +48,7 @@ New Swift files dropped into any group folder are compiled automatically — no 
 
 ## 2. History data-source DI switch
 
-**File:** [`Smart Air Monitor/App/Smart_Air_MonitorApp.swift`](Smart%20Air%20Monitor/App/Smart_Air_MonitorApp.swift)
+**File:** [`G2-iOS/App/G2_iOSApp.swift`](G2-iOS/App/G2_iOSApp.swift)
 
 ```swift
 #if targetEnvironment(simulator)
@@ -62,14 +62,21 @@ Default is platform-conditional: **`.ble` on device**, **`.mock` in the Simulato
 
 | Value | Behaviour |
 |-------|-----------|
-| `.ble` **(device default)** | `BLEHistoryRepository` — sends opcode `0x01`, then streams each 22-byte flash record as it arrives via `HistoryStreamEvent`. Inserts records into SwiftData and returns `.completed(count:)` on the end-of-sync sentinel. |
-| `.mock` **(Simulator default)** | `MockHistoryRepository` — 60 days × ~4 samples/hour of synthetic data with diurnal variation and cooking/cleaning spikes. Works offline and in Simulator. Use this for UI development and design review. |
+| `.ble` **(device default)** | `BLEHistoryRepository` — incremental sync (opcode `0x0C` newest-N) when a cache exists, full dump (opcode `0x01`) on first sync or when the cache is stale beyond retention. Records stream via `HistoryStreamEvent` and persist through the `HistoryDataStore` actor. |
+| `.mock` **(Simulator default)** | `MockHistoryRepository` — 60 days × ~4 samples/hour of synthetic data with diurnal variation and cooking/cleaning spikes, generated under device ID `MOCK`. Works offline and in Simulator. |
 
 Switching the constant is the **only** change needed to flip data sources; views, `HistoryStore`, and SwiftData are unchanged.
 
-**Switching sources clears stale rows.** The composition root records the active source in `UserDefaults`; when it changes between launches, persisted `HistoryRecord`s from the previous source are wiped so (e.g.) old mock data never masquerades as device history.
+**Switching sources clears stale rows.** The composition root records the active source + cache generation in `UserDefaults`; when either changes between launches, persisted `HistoryRecord`s are wiped so old rows never masquerade as fresh history.
 
-**Sync robustness.** A history sync ends on the end-of-sync sentinel, on link loss, or after ~6 s with no packet (`historyInactivityTimeout`) — so firmware that doesn't answer `SYNC_HISTORY` yields an honest `.noRecords` result instead of an endless spinner. On the live device, the History tab starts empty until you pull-to-refresh / tap **Sync**; the live **Dashboard** is unaffected (always live BLE, no mock path on-device).
+**Sync robustness.** A history sync ends on the end-of-sync sentinel, on link loss, or after ~6 s with no packet (`historyInactivityTimeout`) — so firmware that doesn't answer a sync command yields an honest `.noRecords` result instead of an endless spinner. On the live device, the History tab starts empty until you pull-to-refresh / tap **Sync**; the live **Dashboard** is unaffected (always live BLE, no mock path on-device).
+
+## 2b. Per-device caching & memory model
+
+- **Multi-device:** every `HistoryRecord` carries a `deviceID` — the last two bytes of the peripheral's Bluetooth identifier (e.g. `"9A2B"`, matching the short ID in the scan list). iOS hides the real BLE MAC, so this is derived from CoreBluetooth's stable per-device UUID. All queries and syncs are scoped to the connected device; after disconnect the History tab keeps showing the most recently synced one.
+- **Retention:** after every completed sync the cache is pruned to the trailing **90 days** per device (`HistoryDataStore.retention`) — bounded at ~130k records ≈ < 3 MB.
+- **Memory/UI:** heavy work lives on the `HistoryDataStore` `@ModelActor` — batched inserts (500/batch), timestamp dedupe, pruning, and chunked chart aggregation all run off the main thread; only small `Sendable` value arrays cross to the UI. The drill-down list fetches at most 200 rows (`HistoryStore.listLimit`); the header shows the true in-range total.
+- **Unanchored timestamps:** if the device's RTC was unreadable at log time, the record's timestamp is seconds-since-boot; anything before 2020-01-01 is treated as unanchored and skipped during caching so it can't corrupt time-keyed sorting/dedup.
 
 ---
 
@@ -77,19 +84,19 @@ Switching the constant is the **only** change needed to flip data sources; views
 
 ### 3.1 History sync — `BLEHistoryRepository`
 
-**File:** [`Smart Air Monitor/History/BLEHistoryRepository.swift`](Smart%20Air%20Monitor/History/BLEHistoryRepository.swift)
+**File:** [`G2-iOS/History/BLEHistoryRepository.swift`](G2-iOS/History/BLEHistoryRepository.swift)
 
-**Implemented.** `BLEHistoryRepository.syncHistory()` calls `BluetoothManager.startHistorySync()`, which sends opcode `0x01` and returns an `AsyncStream<HistoryStreamEvent>`. `BluetoothManager.handleValueUpdate` demuxes incoming notifications on the Sensor characteristic by `payload[0]`: `0x02` = live data → `SensorParser`; `0xA5` = history packet → `HistoryPacketParser` → `historyStreamContinuation.yield(...)`. `BLEHistoryRepository` iterates the stream, inserts each `HistoryRecord` into the SwiftData context, and returns `.completed(count:)` on the end-of-sync sentinel.
+**Implemented.** `BLEHistoryRepository.syncHistory()` picks the mode from the device's cached high-water mark: empty/stale cache → **full dump** (`0x01`); otherwise **incremental** (`0x0C` + u32 LE count), where count = minutes-behind + a 30-record safety margin (records are ~1/min but gaps happen). `BluetoothManager.handleValueUpdate` demuxes notifications on the Sensor characteristic by `payload[0]`: `0x02` = live → `SensorParser`; `0xA5` = history → `HistoryPacketParser` → the `AsyncStream`. Live packets keep arriving during a stream and are handled normally. Batches of 500 records go to the `HistoryDataStore` actor, which **dedupes by timestamp** (re-syncing is idempotent), skips unanchored timestamps, and saves incrementally. The stream finalizes on the **all-zero-record end-of-sync sentinel** (always sent, even for a count-0 handshake); u24 `index`/`total` drive the progress bar. After completion the cache is pruned to 90 days and `.completed(count:)` reports the true store count. A dropped stream has no resume/ACK — the next sync just picks up incrementally.
 
 ### 3.2 Time synchronisation — `SettingsView`
 
-**File:** [`Smart Air Monitor/Views/Settings/SettingsView.swift`](Smart%20Air%20Monitor/Views/Settings/SettingsView.swift)
+**File:** [`G2-iOS/Views/Settings/SettingsView.swift`](G2-iOS/Views/Settings/SettingsView.swift)
 
 **Implemented.** "Sync device clock" calls `BluetoothManager.setDeviceTime()`, which builds the 8-byte opcode `0x0B SET_TIME` payload and writes it to the Command characteristic. All 7 date fields are raw decimal (not BCD); `wday` is mapped from Calendar's 1=Sun convention to firmware's 0=Sun convention. The button is disabled when not connected.
 
 ### 3.3 Simulator BLE stub — `BluetoothManager`
 
-**File:** [`Smart Air Monitor/BLE/BluetoothManager.swift`](Smart%20Air%20Monitor/BLE/BluetoothManager.swift)
+**File:** [`G2-iOS/BLE/BluetoothManager.swift`](G2-iOS/BLE/BluetoothManager.swift)
 
 iOS Simulator has no CoreBluetooth radio. The `#if targetEnvironment(simulator)` extension provides:
 
@@ -104,7 +111,7 @@ This code is **excluded from device builds** at compile time; it adds zero overh
 
 ## 4. GATT sensor payload mapping
 
-**Source of truth:** [`Smart Air Monitor/BLE/GATT.swift`](Smart%20Air%20Monitor/BLE/GATT.swift) and [`Smart Air Monitor/BLE/SensorParser.swift`](Smart%20Air%20Monitor/BLE/SensorParser.swift)
+**Source of truth:** [`G2-iOS/BLE/GATT.swift`](G2-iOS/BLE/GATT.swift) and [`G2-iOS/BLE/SensorParser.swift`](G2-iOS/BLE/SensorParser.swift)
 
 ### Sensor characteristic (`0x7A3E4F5C-…`)
 
@@ -151,6 +158,7 @@ WRITE + WRITE_NO_RSP.
 | `0x09` | 1 | `GET_STATUS` — force an immediate sensor notification |
 | `0x0A` | 1 | `FAN_TVOC_AUTO` — setpoint-driven auto (uses Settings thresholds) |
 | `0x0B` | 8 | `SET_TIME [sec min hr wday mday mon yr2k]` — set DS3231 RTC; all raw decimal |
+| `0x0C` | 5 | `SYNC_RECENT [count: u32 LE]` — stream the newest N records; `count 0` = sentinel-only handshake |
 
 ATT error `0x0E` = unknown opcode. Surfaced in the UI via `CommandFeedback.rejected`.
 
@@ -169,7 +177,7 @@ Thresholds must be strictly increasing (`lo < med < hi < max`); the app validate
 
 ### History sync packet (31 bytes, on Sensor characteristic)
 
-After `0x01 SYNC_HISTORY` is written, the device streams records as notifications on the **Sensor characteristic** (same UUID, same CCCD subscription).
+After a sync command (`0x01` full dump, or `0x0C` + u32 LE count for the newest N records), the device streams records as notifications on the **Sensor characteristic** (same UUID, same CCCD subscription — subscribe **before** writing the command or the firmware silently ignores it). Framing per `BLE_HISTORY_PROTOCOL.md`:
 
 **Demux rule:** `payload[0] == 0x02` → live sensor data; `payload[0] == 0xA5` → history packet.
 
@@ -177,33 +185,32 @@ After `0x01 SYNC_HISTORY` is written, the device streams records as notification
 |-------|-------|-------|
 | 0 | `0xA5` marker | — |
 | 1 | `0x48` marker | ASCII `'H'` |
-| 2–3 | Total record count | uint16 LE — constant across a sync |
-| 4–5 | Record index | uint16 LE — 0 = oldest; `index == totalCount` → end-of-sync sentinel |
-| 6–27 | `geue_log_record_t` | 22-byte flash record (see below) |
-| 28–30 | Reserved `0x00` | — |
+| 2–4 | Total | **u24 LE** — record count in **this** sync (recent-N → N) |
+| 5–7 | Index | **u24 LE** — 0-based position within this sync |
+| 8–29 | `geue_log_record_t` | 22-byte flash record (see below) |
+| 30 | Reserved `0x00` | — |
 
-End-of-sync sentinel: `index == totalCount` and bytes 6–27 all `0x00`.
+u24 `total`/`index` are sync-relative and don't wrap for any realistic buffer, so `index/total` is a reliable progress fraction. **End-of-sync is still the packet whose 22 record bytes (8–29) are all `0x00`** — always sent, even for a count-0 handshake. Records are cached in arrival order, keyed per device by the record's own timestamp.
 
-### History flash record (22 bytes, `geue_log_record_t` at packet bytes 6–27)
+### History flash record (22 bytes, `geue_log_record_t` at packet bytes 8–29)
 
-Grew 16 → 22 bytes when PM was added to the flash log (firmware **2026-07-09**).
-Each synced record maps to `HistoryRecord` field-for-field (record-relative byte offsets):
+**Flash struct order — timestamp FIRST** (this differs from the live sensor payload):
 
-| Record bytes | Field | Notes |
-|-------|-------|-------|
-| 0–1 | Temperature `Int16` LE | ÷ 100 → °C; `0x8000` = sentinel |
-| 2–3 | Humidity `UInt16` LE | ÷ 100 → %; `0xFFFF` = sentinel |
-| 4–5 | TVOC `UInt16` LE | ppb; `0xFFFF` = sentinel |
-| 6–7 | eCO₂ `UInt16` LE | ppm; `0xFFFF` = sentinel |
-| 8 | AQI `UInt8` | 0–5 |
-| 9 | Status `UInt8` | bitmask |
-| 10–11 | Sequence `UInt16` LE | monotonic counter |
-| 12–15 | Timestamp `UInt32` LE | Unix epoch seconds |
-| 16–17 | PM1.0 `UInt16` LE | µg/m³; `0xFFFF` (no reading) / `0xFFFE` (over-range) = sentinel |
-| 18–19 | PM2.5 `UInt16` LE | µg/m³; `0xFFFF` / `0xFFFE` = sentinel |
-| 20–21 | PM10 `UInt16` LE | µg/m³; `0xFFFF` / `0xFFFE` = sentinel |
+| Record bytes | Packet bytes | Field | Notes |
+|-------|-------|-------|-------|
+| 0–3 | 8–11 | Timestamp `UInt32` LE | Unix epoch seconds; may be seconds-since-boot if the RTC read failed — pre-2020 values are treated as unanchored and skipped |
+| 4–5 | 12–13 | Temperature `Int16` LE | ÷ 100 → °C; `0x8000` = sentinel |
+| 6–7 | 14–15 | Humidity `UInt16` LE | ÷ 100 → %; `0xFFFF` = sentinel |
+| 8–9 | 16–17 | TVOC `UInt16` LE | ppb; `0xFFFF` = sentinel |
+| 10–11 | 18–19 | eCO₂ `UInt16` LE | ppm; `0xFFFF` = sentinel |
+| 12 | 20 | AQI `UInt8` | UBA 1–5; `0` = warming up |
+| 13 | 21 | Status `UInt8` | bitfield |
+| 14–15 | 22–23 | Sequence `UInt16` LE | cross-ref only, **not** an ordering key |
+| 16–17 | 24–25 | PM1.0 `UInt16` LE | µg/m³; `0xFFFF` (no reading) / `0xFFFE` (over-range) = sentinel |
+| 18–19 | 26–27 | PM2.5 `UInt16` LE | µg/m³; `0xFFFF` / `0xFFFE` = sentinel |
+| 20–21 | 28–29 | PM10 `UInt16` LE | µg/m³; `0xFFFF` / `0xFFFE` = sentinel |
 
-PM is now logged and charts as real PM1.0/PM2.5/PM10 series in the History tab.
+PM is logged and charts as real PM1.0/PM2.5/PM10 series in the History tab.
 Both PM sentinels (`0xFFFF` no-reading, `0xFFFE` over-range) are decoded to
 "invalid" (`—`) by the single shared `GATT.decodePM`, used by the live and history
 parsers alike. Records synced from firmware older than 2026-07-09 simply carry no
