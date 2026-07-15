@@ -51,15 +51,25 @@ New Swift files dropped into any group folder are compiled automatically — no 
 **File:** [`Smart Air Monitor/App/Smart_Air_MonitorApp.swift`](Smart%20Air%20Monitor/App/Smart_Air_MonitorApp.swift)
 
 ```swift
-private static let historyDataSource: HistoryDataSource = .mock   // ← change to .ble
+#if targetEnvironment(simulator)
+private static let historyDataSource: HistoryDataSource = .mock   // no BLE radio in the Simulator
+#else
+private static let historyDataSource: HistoryDataSource = .ble    // live device sync
+#endif
 ```
+
+Default is platform-conditional: **`.ble` on device**, **`.mock` in the Simulator** (which has no BLE radio). Override either branch to force a source.
 
 | Value | Behaviour |
 |-------|-----------|
-| `.mock` | `MockHistoryRepository` — 60 days × ~4 samples/hour of synthetic data with diurnal variation and cooking/cleaning spikes. Works offline and in Simulator. Use this for UI development and design review. |
-| `.ble` | `BLEHistoryRepository` — sends opcode `0x01`, then streams each 16-byte flash record as it arrives via `HistoryStreamEvent`. Inserts records into SwiftData and returns `.completed(count:)` on the end-of-sync sentinel. Use this on real hardware. |
+| `.ble` **(device default)** | `BLEHistoryRepository` — sends opcode `0x01`, then streams each 22-byte flash record as it arrives via `HistoryStreamEvent`. Inserts records into SwiftData and returns `.completed(count:)` on the end-of-sync sentinel. |
+| `.mock` **(Simulator default)** | `MockHistoryRepository` — 60 days × ~4 samples/hour of synthetic data with diurnal variation and cooking/cleaning spikes. Works offline and in Simulator. Use this for UI development and design review. |
 
 Switching the constant is the **only** change needed to flip data sources; views, `HistoryStore`, and SwiftData are unchanged.
+
+**Switching sources clears stale rows.** The composition root records the active source in `UserDefaults`; when it changes between launches, persisted `HistoryRecord`s from the previous source are wiped so (e.g.) old mock data never masquerades as device history.
+
+**Sync robustness.** A history sync ends on the end-of-sync sentinel, on link loss, or after ~6 s with no packet (`historyInactivityTimeout`) — so firmware that doesn't answer `SYNC_HISTORY` yields an honest `.noRecords` result instead of an endless spinner. On the live device, the History tab starts empty until you pull-to-refresh / tap **Sync**; the live **Dashboard** is unaffected (always live BLE, no mock path on-device).
 
 ---
 
@@ -109,9 +119,9 @@ READ + NOTIFY, **31-byte** payload, little-endian multi-byte fields.
 | 10–11 | +2 | Relative Humidity | `UInt16` LE | ÷ 100 → % | `0xFFFF` |
 | 12–13 | +4 | TVOC | `UInt16` LE | raw ppb | `0xFFFF` |
 | 14–15 | +6 | eCO₂ | `UInt16` LE | raw ppm | `0xFFFF` |
-| 16–17 | +8 | PM1.0 | `UInt16` LE | raw µg/m³ | `0xFFFF` |
-| 18–19 | +10 | PM2.5 | `UInt16` LE | raw µg/m³ | `0xFFFF` |
-| 20–21 | +12 | PM10 | `UInt16` LE | raw µg/m³ | `0xFFFF` |
+| 16–17 | +8 | PM1.0 | `UInt16` LE | raw µg/m³ | `0xFFFF` / `0xFFFE` (via `GATT.decodePM`) |
+| 18–19 | +10 | PM2.5 | `UInt16` LE | raw µg/m³ | `0xFFFF` / `0xFFFE` (via `GATT.decodePM`) |
+| 20–21 | +12 | PM10 | `UInt16` LE | raw µg/m³ | `0xFFFF` / `0xFFFE` (via `GATT.decodePM`) |
 | 22 | +14 | AQI level | `UInt8` | `AQILevel(raw:)` 0–5 | n/a |
 | 23 | +15 | Fan speed | `UInt8` | raw 0–100 % | n/a |
 | 24 | +16 | Device status | `UInt8` | `DeviceStatus(raw:)` bitmask | n/a |
@@ -169,16 +179,17 @@ After `0x01 SYNC_HISTORY` is written, the device streams records as notification
 | 1 | `0x48` marker | ASCII `'H'` |
 | 2–3 | Total record count | uint16 LE — constant across a sync |
 | 4–5 | Record index | uint16 LE — 0 = oldest; `index == totalCount` → end-of-sync sentinel |
-| 6–21 | `geue_log_record_t` | 16-byte flash record (see below) |
-| 22–30 | Reserved `0x00` | — |
+| 6–27 | `geue_log_record_t` | 22-byte flash record (see below) |
+| 28–30 | Reserved `0x00` | — |
 
-End-of-sync sentinel: `index == totalCount` and bytes 6–21 all `0x00`.
+End-of-sync sentinel: `index == totalCount` and bytes 6–27 all `0x00`.
 
-### History flash record (16 bytes, `geue_log_record_t` at bytes 6–21)
+### History flash record (22 bytes, `geue_log_record_t` at packet bytes 6–27)
 
-Each synced record matches `HistoryRecord` field-for-field:
+Grew 16 → 22 bytes when PM was added to the flash log (firmware **2026-07-09**).
+Each synced record maps to `HistoryRecord` field-for-field (record-relative byte offsets):
 
-| Bytes | Field | Notes |
+| Record bytes | Field | Notes |
 |-------|-------|-------|
 | 0–1 | Temperature `Int16` LE | ÷ 100 → °C; `0x8000` = sentinel |
 | 2–3 | Humidity `UInt16` LE | ÷ 100 → %; `0xFFFF` = sentinel |
@@ -188,8 +199,15 @@ Each synced record matches `HistoryRecord` field-for-field:
 | 9 | Status `UInt8` | bitmask |
 | 10–11 | Sequence `UInt16` LE | monotonic counter |
 | 12–15 | Timestamp `UInt32` LE | Unix epoch seconds |
+| 16–17 | PM1.0 `UInt16` LE | µg/m³; `0xFFFF` (no reading) / `0xFFFE` (over-range) = sentinel |
+| 18–19 | PM2.5 `UInt16` LE | µg/m³; `0xFFFF` / `0xFFFE` = sentinel |
+| 20–21 | PM10 `UInt16` LE | µg/m³; `0xFFFF` / `0xFFFE` = sentinel |
 
-PM is **not** logged in the flash record. The PM chart metric in the History tab shows a placeholder explaining this rather than fabricating data.
+PM is now logged and charts as real PM1.0/PM2.5/PM10 series in the History tab.
+Both PM sentinels (`0xFFFF` no-reading, `0xFFFE` over-range) are decoded to
+"invalid" (`—`) by the single shared `GATT.decodePM`, used by the live and history
+parsers alike. Records synced from firmware older than 2026-07-09 simply carry no
+PM and render `—`.
 
 ---
 

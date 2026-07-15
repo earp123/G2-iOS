@@ -69,14 +69,29 @@ final class HistoryStore {
     /// Aggregated, bucketed points for the chart. Buckets average the valid values
     /// of `selectedMetric`; buckets with only sentinels are dropped (gaps show).
     var chartPoints: [ChartPoint] {
-        guard selectedMetric.isLogged else { return [] }
+        bucketedSeries { selectedMetric.value(from: $0) }
+    }
+
+    /// Temperature (°C) series for the Temp/Humidity overlay (§4.2).
+    var temperatureSeries: [ChartPoint] {
+        bucketedSeries { $0.temperatureC }
+    }
+
+    /// Humidity (%) series for the Temp/Humidity overlay (§4.2).
+    var humiditySeries: [ChartPoint] {
+        bucketedSeries { $0.humidityPct }
+    }
+
+    /// Buckets records in the selected range and averages each bucket's valid
+    /// values from `value`. Buckets with only sentinels are dropped so gaps show.
+    private func bucketedSeries(_ value: (HistoryRecord) -> Double?) -> [ChartPoint] {
         let cutoff = Date().addingTimeInterval(-selectedRange.duration)
         let bucket = selectedRange.bucket
 
         // Group by bucket index (ascending time for the chart's x-axis).
         var sums: [Int: (total: Double, count: Int, anchor: Date)] = [:]
         for record in allRecords where record.timestamp >= cutoff {
-            guard let v = selectedMetric.value(from: record) else { continue }
+            guard let v = value(record) else { continue }
             let idx = Int(record.timestamp.timeIntervalSince1970 / bucket)
             let anchor = Date(timeIntervalSince1970: Double(idx) * bucket)
             if let existing = sums[idx] {

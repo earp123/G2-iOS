@@ -7,57 +7,59 @@
 
 import SwiftUI
 
-/// Metric the chart plots. PM is present but intentionally "not logged" — it is
-/// absent from the 16-byte flash record, so we say so rather than faking it (§4.2).
+/// Metric the chart plots. `tempHumidity` is a dual-axis overlay (temperature °C on
+/// the left axis, humidity % on the right); the rest are single series. PM1.0/PM2.5/
+/// PM10 are logged in the flash record since firmware 2026-07-09 (§4.2).
 enum HistoryMetric: String, CaseIterable, Identifiable, Sendable {
-    case temperature, humidity, tvoc, eco2, aqi, pm
+    case tempHumidity, tvoc, eco2, pm1, pm25, pm10
     var id: String { rawValue }
 
+    /// Compact label for the segmented picker.
     var title: String {
         switch self {
-        case .temperature: "Temp"
-        case .humidity:    "Humidity"
-        case .tvoc:        "TVOC"
-        case .eco2:        "eCO₂"
-        case .aqi:         "AQI"
-        case .pm:          "PM"
+        case .tempHumidity: "Temp/RH"
+        case .tvoc:         "TVOC"
+        case .eco2:         "eCO₂"
+        case .pm1:          "PM1.0"
+        case .pm25:         "PM2.5"
+        case .pm10:         "PM10"
         }
     }
 
     var unit: String {
         switch self {
-        case .temperature: "°C"
-        case .humidity:    "%"
-        case .tvoc:        "ppb"
-        case .eco2:        "ppm"
-        case .aqi:         "UBA"
-        case .pm:          "µg/m³"
+        case .tempHumidity: "°C · %"
+        case .tvoc:         "ppb"
+        case .eco2:         "ppm"
+        case .pm1, .pm25, .pm10: "µg/m³"
         }
     }
 
-    /// PM is not logged in the flash record (§4.2).
-    var isLogged: Bool { self != .pm }
+    /// True for the dual-axis Temp/Humidity overlay, which the chart renders via a
+    /// dedicated path instead of the single-series `value(from:)`.
+    var isOverlay: Bool { self == .tempHumidity }
 
     var tint: Color {
         switch self {
-        case .temperature: Theme.accentWarm
-        case .humidity:    Theme.accentCool
-        case .tvoc:        Theme.accentViolet
-        case .eco2:        Theme.accentTeal
-        case .aqi:         Theme.accent
-        case .pm:          Theme.textSecondary
+        case .tempHumidity: Theme.accentWarm
+        case .tvoc:         Theme.accentViolet
+        case .eco2:         Theme.accentTeal
+        case .pm1:          Theme.aqiExcellent   // matches Dashboard PM row colors
+        case .pm25:         Theme.aqiModerate
+        case .pm10:         Theme.aqiPoor
         }
     }
 
-    /// Extracts this metric's value from a record (nil if sentinel / not logged).
+    /// Extracts this single-series metric's value from a record (nil if sentinel /
+    /// not present). Not used for `tempHumidity` — see `HistoryStore` series.
     func value(from record: HistoryRecord) -> Double? {
         switch self {
-        case .temperature: record.temperatureC
-        case .humidity:    record.humidityPct
-        case .tvoc:        record.tvocPpb.map(Double.init)
-        case .eco2:        record.eco2Ppm.map(Double.init)
-        case .aqi:         record.aqi == 0 ? nil : Double(record.aqi)
-        case .pm:          nil
+        case .tempHumidity: nil
+        case .tvoc:         record.tvocPpb.map(Double.init)
+        case .eco2:         record.eco2Ppm.map(Double.init)
+        case .pm1:          record.pm1.map(Double.init)
+        case .pm25:         record.pm25.map(Double.init)
+        case .pm10:         record.pm10.map(Double.init)
         }
     }
 }

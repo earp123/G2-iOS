@@ -67,10 +67,15 @@ final class BluetoothManager: NSObject {
     @ObservationIgnored private var writeWatchdog: Task<Void, Never>?
     @ObservationIgnored private var rssiPoller: Task<Void, Never>?
     @ObservationIgnored private var historyStreamContinuation: AsyncStream<HistoryStreamEvent>.Continuation?
+    @ObservationIgnored private var historyWatchdog: Task<Void, Never>?
+    @ObservationIgnored private var lastHistoryActivity: Date = .distantPast
 
     private static let scanTimeout: Duration = .seconds(15)
     private static let connectTimeout: Duration = .seconds(15)
     private static let writeTimeout: Duration = .seconds(5)
+    /// End a history sync if no packet arrives for this long — covers firmware that
+    /// doesn't implement/answer SYNC_HISTORY, so the UI never spins forever.
+    private static let historyInactivityTimeout: TimeInterval = 6
 
     // MARK: - Simulation (Simulator only — there is no CoreBluetooth radio in the
     // iOS Simulator). This makes the whole app exercisable in the Simulator and is
@@ -190,6 +195,7 @@ final class BluetoothManager: NSObject {
         connectWatchdog?.cancel()
         writeWatchdog?.cancel()
         rssiPoller?.cancel()
+        historyWatchdog?.cancel()
         historyStreamContinuation?.finish()   // abort any in-flight sync
         historyStreamContinuation = nil
 
@@ -440,9 +446,11 @@ final class BluetoothManager: NSObject {
 
     private func handleHistoryPacket(_ data: Data) {
         guard let packet = HistoryPacketParser.parse(data) else { return }
+        lastHistoryActivity = Date()   // progress — keep the inactivity watchdog at bay
         if let fields = packet.fields {
             historyStreamContinuation?.yield(.record(fields))
         } else {
+            historyWatchdog?.cancel()
             historyStreamContinuation?.yield(.completed(totalCount: packet.totalCount))
             historyStreamContinuation?.finish()
             historyStreamContinuation = nil
@@ -481,13 +489,34 @@ extension BluetoothManager: HistorySyncTransport {
     var isConnected: Bool { phase == .connected }
 
     /// Sends opcode 0x01, then yields one HistoryStreamEvent per received history
-    /// packet. Finishes when the end-of-sync sentinel arrives or the connection drops.
+    /// packet. Finishes on the end-of-sync sentinel, on link loss, or if no packet
+    /// arrives within `historyInactivityTimeout` (firmware that doesn't stream).
     func startHistorySync() -> AsyncStream<HistoryStreamEvent> {
         let (stream, continuation) = AsyncStream<HistoryStreamEvent>.makeStream()
         historyStreamContinuation?.finish()   // cancel any in-flight sync
         historyStreamContinuation = continuation
         sendCommand(.syncHistory)
+        startHistoryWatchdog()
         return stream
+    }
+
+    /// A single poller that ends the stream once no history packet has arrived for
+    /// `historyInactivityTimeout`. `lastHistoryActivity` is refreshed per packet, so
+    /// a long, healthy sync never trips it — only a stalled/absent one does.
+    private func startHistoryWatchdog() {
+        historyWatchdog?.cancel()
+        lastHistoryActivity = Date()
+        historyWatchdog = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard let self, !Task.isCancelled, self.historyStreamContinuation != nil else { return }
+                if Date().timeIntervalSince(self.lastHistoryActivity) > Self.historyInactivityTimeout {
+                    self.historyStreamContinuation?.finish()   // no records / no response
+                    self.historyStreamContinuation = nil
+                    return
+                }
+            }
+        }
     }
 }
 
@@ -699,7 +728,9 @@ extension BluetoothManager {
             humidity: hum,
             tvoc: tvoc,
             eco2: eco2,
-            pm1: pm1, pm25: pm25, pm10: pm10,
+            pm1:  injectSentinel ? nil : pm1,   // nil → 0xFFFF, exercises PM "—" path
+            pm25: injectSentinel ? nil : pm25,
+            pm10: injectSentinel ? nil : pm10,
             aqi: injectSentinel ? 0 : aqi,
             fan: simFanSpeed,
             status: 0x1F,                 // all sensors healthy
@@ -725,9 +756,11 @@ extension BluetoothManager {
         putU16(humidity.map { UInt16(max(0, min(655, $0)) * 100) } ?? 0xFFFF, 10)
         putU16(tvoc.map { UInt16(min(65534, $0)) } ?? 0xFFFF, 12)
         putU16(eco2.map { UInt16(min(65534, $0)) } ?? 0xFFFF, 14)
-        putU16(pm1.map  { UInt16(min(65534, $0)) } ?? 0xFFFF, 16)
-        putU16(pm25.map { UInt16(min(65534, $0)) } ?? 0xFFFF, 18)
-        putU16(pm10.map { UInt16(min(65534, $0)) } ?? 0xFFFF, 20)
+        // Cap valid PM at 65533; 0xFFFE (over-range) and 0xFFFF (no-reading) are
+        // reserved sentinels. nil encodes as no-reading.
+        putU16(pm1.map  { UInt16(min(65533, $0)) } ?? GATT.pmSentinelNoReading, 16)
+        putU16(pm25.map { UInt16(min(65533, $0)) } ?? GATT.pmSentinelNoReading, 18)
+        putU16(pm10.map { UInt16(min(65533, $0)) } ?? GATT.pmSentinelNoReading, 20)
         b[22] = aqi
         b[23] = UInt8(max(0, min(100, fan)))
         b[24] = status

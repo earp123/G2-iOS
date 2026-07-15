@@ -20,11 +20,12 @@ struct DeviceStatus: Equatable, Sendable {
     let raw: UInt8
 
     /// Bit → human-readable sensor subsystem (§2.3).
+    // Bits 5–7 are reserved/unused — firmware defines no meaning, so we don't label them.
     private static let labels: [(bit: Int, label: String)] = [
         (0, "AHT21 initialised"),          // temp/humidity initialised
         (1, "AHT21 last read OK"),         // temp/humidity last read succeeded
         (2, "ENS160 initialised"),         // VOC/CO2 initialised
-        (3, "TWAI (CAN) node initialised"),
+        (3, "TWAI (CAN) node online"),     // initialised AND not bus-off (firmware 2026-07-09)
         (4, "BMV080 (PM) measuring"),      // PM opened and measuring
     ]
 

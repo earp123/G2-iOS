@@ -19,6 +19,13 @@ enum Metric<Value: Equatable & Sendable>: Equatable, Sendable {
     }
 
     var isValid: Bool { value != nil }
+
+    /// Bridges the decoders' `Value?` sentinel convention into `Metric`: `nil`
+    /// becomes `.invalid`. Lets a shared `UInt16 -> Value?` decode (e.g.
+    /// `GATT.decodePM`) feed both `Metric` (live) and `Value?` (history) call sites.
+    init(_ optional: Value?) {
+        if let optional { self = .valid(optional) } else { self = .invalid }
+    }
 }
 
 extension Metric where Value == Double {

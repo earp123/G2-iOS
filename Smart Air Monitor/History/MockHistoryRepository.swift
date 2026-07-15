@@ -101,6 +101,13 @@ final class MockHistoryRepository: HistoryRepository {
             // Mostly all-healthy (0x1F); occasionally a sensor read blip clears a bit.
             let status: UInt8 = Double.random(in: 0...1) < 0.02 ? 0x1D : 0x1F
 
+            // Particulate matter: low baselines that rise with the day and spike
+            // alongside cooking/cleaning TVOC events. PM10 > PM2.5 > PM1.0.
+            let pmSpike = (tvoc > 400) ? Double.random(in: 20...60) : 0
+            let pm1  = max(0, 5.0  + dayPhase * 4.0 + pmSpike * 0.5 + Double.random(in: -2...2))
+            let pm25 = max(0, 9.0  + dayPhase * 6.0 + pmSpike       + Double.random(in: -3...3))
+            let pm10 = max(0, 14.0 + dayPhase * 8.0 + pmSpike * 1.4 + Double.random(in: -4...4))
+
             // ~3% of samples carry an invalid sentinel on some field (§4.1 gaps).
             let gap = Double.random(in: 0...1) < 0.03
 
@@ -112,7 +119,10 @@ final class MockHistoryRepository: HistoryRepository {
                 eco2Ppm:      gap && Bool.random() ? nil : Int(eco2.rounded()),
                 aqi:          gap ? 0 : aqi,
                 status:       status,
-                sequence:     sequence
+                sequence:     sequence,
+                pm1:          gap && Bool.random() ? nil : Int(pm1.rounded()),
+                pm25:         gap ? nil : Int(pm25.rounded()),
+                pm10:         gap && Bool.random() ? nil : Int(pm10.rounded())
             )
             context.insert(record)
             sequence = sequence &+ 1   // wraps at 65535, like the firmware counter

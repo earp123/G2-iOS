@@ -3,8 +3,9 @@
 //  Smart Air Monitor
 //
 //  BLE history source. Sends CMD_SYNC_HISTORY (0x01) and collects the resulting
-//  stream of 16-byte flash records that the device sends back as notifications on
-//  the Sensor Data characteristic (demuxed by BluetoothManager on payload[0] == 0xA5).
+//  stream of 22-byte flash records (16 → 22 with PM logging) that the device sends
+//  back as notifications on the Sensor Data characteristic (demuxed by
+//  BluetoothManager on payload[0] == 0xA5).
 //
 //  Each HistoryStreamEvent.record carries a HistoryRecordFields value, which this
 //  class converts to a @Model HistoryRecord and inserts into the SwiftData context.
@@ -38,9 +39,12 @@ final class BLEHistoryRepository: HistoryRepository {
     func syncHistory() async -> HistorySyncResult {
         guard let transport, transport.isConnected else { return .notConnected }
 
-        // Delete stale records before streaming fresh ones.
-        if let existing = try? context.fetch(FetchDescriptor<HistoryRecord>()) {
+        // The device streams its whole ring buffer, so replace everything. Persist
+        // the clear up front — this also discards any leftover mock data even if the
+        // sync then returns nothing.
+        if let existing = try? context.fetch(FetchDescriptor<HistoryRecord>()), !existing.isEmpty {
             existing.forEach { context.delete($0) }
+            try? context.save()
         }
 
         var insertedCount = 0
@@ -55,7 +59,10 @@ final class BLEHistoryRepository: HistoryRepository {
                     eco2Ppm:      fields.eco2Ppm,
                     aqi:          fields.aqi,
                     status:       fields.status,
-                    sequence:     fields.sequence
+                    sequence:     fields.sequence,
+                    pm1:          fields.pm1,
+                    pm25:         fields.pm25,
+                    pm10:         fields.pm10
                 )
                 context.insert(record)
                 insertedCount += 1
@@ -64,8 +71,11 @@ final class BLEHistoryRepository: HistoryRepository {
                 return .completed(count: totalCount)
             }
         }
-        // Stream ended before sentinel — connection dropped mid-sync.
-        if insertedCount > 0 { try? context.save() }
-        return .notConnected
+        // Stream ended without an end-of-sync sentinel (timeout or link loss).
+        if insertedCount > 0 {
+            try? context.save()
+            return .completed(count: insertedCount)   // partial, but real device data
+        }
+        return .noRecords
     }
 }

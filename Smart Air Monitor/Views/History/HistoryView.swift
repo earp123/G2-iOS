@@ -92,18 +92,14 @@ struct HistoryView: View {
 
     private var chartCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(history.selectedMetric.title)
-                    .font(.headline)
-                    .foregroundStyle(Theme.textPrimary)
-                Text(history.selectedMetric.unit)
-                    .font(.caption)
-                    .foregroundStyle(Theme.textSecondary)
-                Spacer()
-            }
+            chartHeader
 
-            if !history.selectedMetric.isLogged {
-                notLoggedPlaceholder
+            if history.selectedMetric.isOverlay {
+                if history.temperatureSeries.isEmpty && history.humiditySeries.isEmpty {
+                    chartPlaceholder("No data in this range.")
+                } else {
+                    tempHumidityChart
+                }
             } else if history.chartPoints.isEmpty {
                 chartPlaceholder("No data in this range.")
             } else {
@@ -114,8 +110,37 @@ struct HistoryView: View {
     }
 
     @ViewBuilder
+    private var chartHeader: some View {
+        if history.selectedMetric.isOverlay {
+            HStack(spacing: 16) {
+                legendChip("Temperature", unit: "°C", color: Theme.accentWarm)
+                legendChip("Humidity", unit: "%", color: Theme.accentCool)
+                Spacer(minLength: 0)
+            }
+        } else {
+            HStack {
+                Text(history.selectedMetric.title)
+                    .font(.headline)
+                    .foregroundStyle(Theme.textPrimary)
+                Text(history.selectedMetric.unit)
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                Spacer()
+            }
+        }
+    }
+
+    private func legendChip(_ title: String, unit: String, color: Color) -> some View {
+        HStack(spacing: 6) {
+            RoundedRectangle(cornerRadius: 1.5).fill(color).frame(width: 16, height: 3)
+            Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(Theme.textPrimary)
+            Text(unit).font(.caption2).foregroundStyle(Theme.textSecondary)
+        }
+    }
+
+    // Single-series chart (TVOC, eCO₂, PM1.0/2.5/10).
     private var chart: some View {
-        let base = Chart(history.chartPoints) { point in
+        Chart(history.chartPoints) { point in
             LineMark(
                 x: .value("Time", point.date),
                 y: .value(history.selectedMetric.title, point.value)
@@ -143,17 +168,82 @@ struct HistoryView: View {
             }
         }
         .frame(height: 200)
-
-        // AQI uses a fixed 0–5 scale; other metrics auto-scale.
-        if history.selectedMetric == .aqi {
-            base.chartYScale(domain: 0.0...5.0)
-        } else {
-            base
-        }
     }
 
-    private var notLoggedPlaceholder: some View {
-        chartPlaceholder("PM is not logged in the 16-byte flash record, so there’s nothing to chart here.")
+    // Dual-axis overlay: temperature (left, °C) + humidity (right, %). Humidity is
+    // mapped into the temperature domain so both lines fill the plot; the trailing
+    // axis labels are inverse-mapped back to %.
+    private var tempHumidityChart: some View {
+        let temp = history.temperatureSeries
+        let hum = history.humiditySeries
+        let tDomain = Self.niceDomain(temp, step: 2, fallback: 16...28)
+        let hDomain = Self.niceDomain(hum, step: 10, fallback: 30...70)
+
+        // Map a humidity value to its position on the temperature scale, and back.
+        func toTemp(_ h: Double) -> Double {
+            let f = (h - hDomain.lowerBound) / (hDomain.upperBound - hDomain.lowerBound)
+            return tDomain.lowerBound + f * (tDomain.upperBound - tDomain.lowerBound)
+        }
+        func toHumidity(_ t: Double) -> Double {
+            let f = (t - tDomain.lowerBound) / (tDomain.upperBound - tDomain.lowerBound)
+            return hDomain.lowerBound + f * (hDomain.upperBound - hDomain.lowerBound)
+        }
+        let humidityTicks = Array(stride(from: hDomain.lowerBound, through: hDomain.upperBound, by: 10))
+
+        return Chart {
+            ForEach(temp) { point in
+                LineMark(
+                    x: .value("Time", point.date),
+                    y: .value("Temperature", point.value),
+                    series: .value("Series", "Temperature")
+                )
+                .interpolationMethod(.catmullRom)
+                .foregroundStyle(Theme.accentWarm)
+            }
+            ForEach(hum) { point in
+                LineMark(
+                    x: .value("Time", point.date),
+                    y: .value("Humidity", toTemp(point.value)),
+                    series: .value("Series", "Humidity")
+                )
+                .interpolationMethod(.catmullRom)
+                .foregroundStyle(Theme.accentCool)
+            }
+        }
+        .chartYScale(domain: tDomain)
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                AxisGridLine().foregroundStyle(Theme.hairline)
+                AxisValueLabel().foregroundStyle(Theme.textSecondary)
+            }
+        }
+        .chartYAxis {
+            AxisMarks(position: .leading) { value in
+                AxisGridLine().foregroundStyle(Theme.hairline)
+                AxisValueLabel {
+                    if let t = value.as(Double.self) {
+                        Text("\(Int(t.rounded()))").foregroundStyle(Theme.accentWarm)
+                    }
+                }
+            }
+            AxisMarks(position: .trailing, values: humidityTicks.map(toTemp)) { value in
+                AxisValueLabel {
+                    if let mapped = value.as(Double.self) {
+                        Text("\(Int(toHumidity(mapped).rounded()))").foregroundStyle(Theme.accentCool)
+                    }
+                }
+            }
+        }
+        .frame(height: 200)
+    }
+
+    /// Rounds a series' min/max out to the nearest `step` for clean axis bounds.
+    private static func niceDomain(_ points: [ChartPoint], step: Double, fallback: ClosedRange<Double>) -> ClosedRange<Double> {
+        let values = points.map(\.value)
+        guard let lo = values.min(), let hi = values.max() else { return fallback }
+        let low = (lo / step).rounded(.down) * step
+        let high = (hi / step).rounded(.up) * step
+        return low < high ? low...high : low...(low + step)
     }
 
     private func chartPlaceholder(_ text: String) -> some View {
@@ -199,6 +289,7 @@ struct HistoryView: View {
         switch result {
         case .completed(let count): "Synced — \(count) records available."
         case .notConnected:         "Connect to a monitor to sync history."
+        case .noRecords:            "The device returned no history. If it should have logs, check that this firmware implements SYNC_HISTORY."
         }
     }
 
@@ -206,6 +297,7 @@ struct HistoryView: View {
         switch result {
         case .completed:    "checkmark.circle.fill"
         case .notConnected: "wifi.slash"
+        case .noRecords:    "tray"
         }
     }
 
@@ -213,6 +305,7 @@ struct HistoryView: View {
         switch result {
         case .completed:    Theme.aqiExcellent
         case .notConnected: Theme.aqiPoor
+        case .noRecords:    Theme.aqiModerate
         }
     }
 

@@ -56,9 +56,11 @@ enum SensorParser {
             humidityPct:  humRaw  == u16Sentinel  ? .invalid : .valid(Double(humRaw) / 100.0),
             tvocPpb:      tvocRaw == u16Sentinel  ? .invalid : .valid(Int(tvocRaw)),
             eco2Ppm:      eco2Raw == u16Sentinel  ? .invalid : .valid(Int(eco2Raw)),
-            pm1:          pm1Raw  == u16Sentinel  ? .invalid : .valid(Int(pm1Raw)),
-            pm25:         pm25Raw == u16Sentinel  ? .invalid : .valid(Int(pm25Raw)),
-            pm10:         pm10Raw == u16Sentinel  ? .invalid : .valid(Int(pm10Raw)),
+            // PM has two invalid sentinels (0xFFFF no-reading, 0xFFFE over-range);
+            // GATT.decodePM folds both to nil so 0xFFFE never shows as 65534 (§ PM).
+            pm1:          Metric(GATT.decodePM(pm1Raw)),
+            pm25:         Metric(GATT.decodePM(pm25Raw)),
+            pm10:         Metric(GATT.decodePM(pm10Raw)),
             aqi:          AQILevel(raw: aqiRaw),
             fanSpeedPct:  Int(fanRaw),
             status:       DeviceStatus(raw: statRaw),

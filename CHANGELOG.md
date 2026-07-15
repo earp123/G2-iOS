@@ -17,6 +17,65 @@ the app version tracks [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] — targeting 1.0.0
 
+### Live history sync by default
+
+#### Changed
+- **`historyDataSource` default is now platform-conditional** — `.ble` on device (the
+  History tab syncs real records from the connected prototype), `.mock` in the
+  Simulator (no BLE radio, so synthetic data keeps the history UI developable).
+- **Switching sources clears stale rows.** The composition root remembers the active
+  source in `UserDefaults`; when it changes between launches, `HistoryRecord`s from
+  the previous source are wiped so leftover mock data can't masquerade as device data.
+- A history sync now clears existing rows **and persists that clear up front**, so a
+  full device snapshot always replaces whatever was there (mock or prior sync).
+
+#### Added
+- **History-sync inactivity timeout** (`BluetoothManager.historyInactivityTimeout`,
+  ~6 s). A single poller ends the stream if no packet arrives, so firmware that
+  doesn't answer `SYNC_HISTORY` produces an honest **`.noRecords`** result (new
+  `HistorySyncResult` case, surfaced in the History sync-status row) instead of an
+  endless spinner. A healthy sync refreshes the timer per packet and never trips it.
+
+### History PM logging + sentinel fix — matches firmware changelog **2026-07-09**
+
+> Firmware/embedded reviewers: the flash log record grew **16 → 22 bytes** ("PM Data
+> in Flash Log"). iOS now decodes and charts PM history, and folds the shared PM
+> over-range sentinel. Byte offsets are in [`BLE/GATT.swift`](Smart%20Air%20Monitor/BLE/GATT.swift)
+> and [`BLE/HistoryPacketParser.swift`](Smart%20Air%20Monitor/BLE/HistoryPacketParser.swift).
+
+#### Added
+- **PM logged in history.** `HistoryPacketParser` now decodes the 22-byte record
+  (PM1.0/PM2.5/PM10 at record bytes 16–21; packet framing unchanged at 31 bytes).
+  `HistoryRecord` gains `pm1`/`pm25`/`pm10` (`Int?`, matching `SensorReading`'s
+  live PM naming). `BLEHistoryRepository` maps them on insert; `MockHistoryRepository`
+  generates plausible PM so `.mock` exercises the same UI paths as `.ble`.
+- **PM in the History UI.** `HistoryMetric` splits the old single `.pm` placeholder
+  into selectable `pm1`/`pm25`/`pm10` series; they chart and appear in the record
+  drill-down. The "PM is not logged" placeholder is gone.
+
+#### Fixed
+- **Live `0xFFFE` PM bug.** PM has two invalid sentinels — `0xFFFF` (no reading)
+  and `0xFFFE` (over-range). The live `SensorParser` previously only checked
+  `0xFFFF`, so an over-range PM rendered as a bogus `65534 µg/m³`. Both are now
+  folded to invalid (`—`) via a single shared `GATT.decodePM`, called from both the
+  live and history parsers. (Sam's call: no distinct over-range UI.)
+
+#### Changed
+- **History chart metrics restructured.** Temperature and Humidity are now a single
+  **dual-axis overlay** (`Temp/RH` — temperature °C on the left axis, humidity % on
+  the right, color-coded with a legend) instead of two separate single-series picks.
+  **AQI removed** as a chart metric (still shown on the Dashboard hero, history-row
+  color dot, and record detail). Picker is now 6 items: Temp/RH · TVOC · eCO₂ ·
+  PM1.0 · PM2.5 · PM10.
+- **`DeviceStatus` bit 3** relabeled "TWAI (CAN) node initialised" → **"TWAI (CAN)
+  node online"** to match firmware (initialised **and** not bus-off). Bits 5–7 remain
+  unlabeled (firmware defines no meaning). Verify-only pass, no other bits changed.
+- Simulator generator emits PM (including occasional sentinels) so Simulator runs
+  exercise the same parser path as hardware.
+- **No SwiftData migration** — pre-1.0, no production data; the new PM fields are
+  optional (lightweight/additive). If a dev machine has a stale local store, delete
+  the app from the simulator rather than writing a versioned migration.
+
 ### BLE ⇄ firmware command wiring — matches firmware changelog **2026-06-29**
 
 > Firmware/embedded reviewers: this is the section for you. The iOS side now speaks
@@ -32,8 +91,9 @@ the app version tracks [Semantic Versioning](https://semver.org/).
   `payload[0]` (`0x02` = live, `0xA5` = history). Streaming stops on the end-of-sync
   sentinel (`recordIndex == totalCount`) or when the link drops.
   - New file [`BLE/HistoryPacketParser.swift`](Smart%20Air%20Monitor/BLE/HistoryPacketParser.swift)
-    decodes the 31-byte history packet (`0xA5 0x48`, total-count, index, 16-byte
-    `geue_log_record_t` at bytes 6–21, timestamp `uint32` LE at record bytes 12–15).
+    decodes the 31-byte history packet (`0xA5 0x48`, total-count, index,
+    `geue_log_record_t` at bytes 6–27, timestamp `uint32` LE at record bytes 12–15).
+    (Record grew 16 → 22 bytes for PM in the 2026-07-09 entry above.)
   - [`History/BLEHistoryRepository.swift`](Smart%20Air%20Monitor/History/BLEHistoryRepository.swift)
     now **fully implemented**: clears stale rows, inserts each streamed record into
     SwiftData, returns `.completed(count:)` on the sentinel. A mid-sync disconnect
@@ -85,7 +145,7 @@ with no force-unwraps on BLE data.
   bitfield), `TVOCThresholds` (monotonic validation + LE encode/decode), `FanMode`,
   `DiscoveredDevice`.
 - **History layer** ([`History/`](Smart%20Air%20Monitor/History)) — SwiftData
-  `HistoryRecord` (@Model, 16-byte flash-record shape; PM intentionally absent),
+  `HistoryRecord` (@Model, flash-record shape; PM added in the 2026-07-09 entry above),
   `HistoryRepository` protocol with a `HistoryDataSource` DI switch,
   `MockHistoryRepository` (60 days of realistic data) and `BLEHistoryRepository`,
   `HistoryStore` view model (bucketed chart aggregation), `HistoryMetric`.

@@ -16,6 +16,9 @@ enum HistorySyncResult: Equatable, Sendable {
     case completed(count: Int)
     /// Cannot sync because there is no active BLE connection (or dropped mid-sync).
     case notConnected
+    /// Connected and sent SYNC_HISTORY, but the device streamed no records before the
+    /// sync timed out (e.g. firmware without history streaming).
+    case noRecords
 }
 
 /// Parsed field values from a single 16-byte geue_log_record_t. A plain Sendable
@@ -29,6 +32,9 @@ struct HistoryRecordFields: Sendable {
     let aqi:          Int
     let status:       UInt8
     let sequence:     UInt16
+    let pm1:          Int?   // µg/m³ (nil = sentinel); PM logged since firmware 2026-07-09
+    let pm25:         Int?
+    let pm10:         Int?
 }
 
 /// Events yielded by the history sync stream (§2 CMD_SYNC_HISTORY).

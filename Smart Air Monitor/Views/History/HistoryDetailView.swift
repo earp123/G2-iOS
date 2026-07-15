@@ -27,16 +27,18 @@ struct HistoryDetailView: View {
                     Divider().overlay(Theme.hairline)
                     InfoRow(label: "eCO₂", value: record.eco2Ppm.map { "\($0) ppm" } ?? "—")
                     Divider().overlay(Theme.hairline)
+                    InfoRow(label: "PM1.0", value: record.pm1.map { "\($0) µg/m³" } ?? "—")
+                    Divider().overlay(Theme.hairline)
+                    InfoRow(label: "PM2.5", value: record.pm25.map { "\($0) µg/m³" } ?? "—")
+                    Divider().overlay(Theme.hairline)
+                    InfoRow(label: "PM10", value: record.pm10.map { "\($0) µg/m³" } ?? "—")
+                    Divider().overlay(Theme.hairline)
                     InfoRow(label: "Sequence", value: "#\(record.sequence)")
                 }
                 .font(.subheadline)
                 .card()
 
                 statusCard
-
-                Text("PM is not logged in the on-device record.")
-                    .font(.caption2)
-                    .foregroundStyle(Theme.textSecondary)
             }
             .padding(Theme.spacing)
         }

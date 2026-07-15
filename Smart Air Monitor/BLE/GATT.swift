@@ -100,8 +100,27 @@ nonisolated enum GATT {
     static let historyTotalCountOffset = 2
     /// Byte offset of the uint16 LE record-index field (0 = oldest).
     static let historyRecordIndexOffset = 4
-    /// Byte offset of the 16-byte geue_log_record_t in a history packet.
+    /// Byte offset of the geue_log_record_t in a history packet.
     static let historyRecordOffset = 6
-    /// Length of geue_log_record_t in the flash ring buffer.
-    static let historyRecordLength = 16
+    /// Length of geue_log_record_t in the flash ring buffer. Grew 16 → 22 when PM
+    /// (PM1.0/PM2.5/PM10) was added to the flash log (firmware changelog 2026-07-09).
+    static let historyRecordLength = 22
+
+    // MARK: - PM invalid sentinels (PM logging update, 2026-07-09)
+    //
+    // Firmware's shared PM→uint16 conversion (live payload, CAN frame, log record)
+    // yields two special values, both meaning "no usable reading". Per Sam's call
+    // they are treated identically as invalid — there is no distinct over-range UI.
+
+    /// No valid reading — sensor absent or not warmed up.
+    static let pmSentinelNoReading: UInt16 = 0xFFFF
+    /// Over-range clamp — folded into the same invalid state as no-reading.
+    static let pmSentinelOverRange: UInt16 = 0xFFFE
+
+    /// The single canonical PM decode: raw µg/m³ → `Int`, or `nil` for either
+    /// sentinel. Shared by SensorParser (live) and HistoryPacketParser (history)
+    /// so the sentinel rule is never duplicated across the two files.
+    static func decodePM(_ raw: UInt16) -> Int? {
+        (raw == pmSentinelNoReading || raw == pmSentinelOverRange) ? nil : Int(raw)
+    }
 }

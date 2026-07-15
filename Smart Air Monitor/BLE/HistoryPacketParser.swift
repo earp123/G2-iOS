@@ -11,10 +11,10 @@
 //    byte 1    : 0x48 marker ('H')
 //    bytes 2–3 : total record count (uint16 LE) — constant across a sync session
 //    bytes 4–5 : record index (uint16 LE) — 0 = oldest; index == totalCount → sentinel
-//    bytes 6–21: geue_log_record_t (16 bytes)
-//    bytes 22–30: reserved 0x00
+//    bytes 6–27: geue_log_record_t (22 bytes)
+//    bytes 28–30: reserved 0x00
 //
-//  geue_log_record_t layout:
+//  geue_log_record_t layout (grew 16 → 22 bytes; PM added, firmware 2026-07-09):
 //    bytes 6–7  : temperature int16 LE (°C × 100); sentinel 0x8000
 //    bytes 8–9  : humidity uint16 LE (% × 100); sentinel 0xFFFF
 //    bytes 10–11: TVOC uint16 LE (ppb); sentinel 0xFFFF
@@ -23,6 +23,9 @@
 //    byte 15    : status uint8 (same bitfield as Sensor char byte 24)
 //    bytes 16–17: sequence uint16 LE
 //    bytes 18–21: Unix timestamp uint32 LE
+//    bytes 22–23: PM1.0 uint16 LE (µg/m³); sentinels 0xFFFF / 0xFFFE
+//    bytes 24–25: PM2.5 uint16 LE (µg/m³); sentinels 0xFFFF / 0xFFFE
+//    bytes 26–27: PM10  uint16 LE (µg/m³); sentinels 0xFFFF / 0xFFFE
 //
 
 import Foundation
@@ -58,6 +61,9 @@ enum HistoryPacketParser {
         let statByte = b[r + 9]
         let seqRaw   = readUInt16LE(b, r + 10)
         let tsRaw    = readUInt32LE(b, r + 12)
+        let pm1Raw   = readUInt16LE(b, r + 16)   // record bytes 16–17
+        let pm25Raw  = readUInt16LE(b, r + 18)   // record bytes 18–19
+        let pm10Raw  = readUInt16LE(b, r + 20)   // record bytes 20–21
 
         let fields = HistoryRecordFields(
             timestamp:    Date(timeIntervalSince1970: TimeInterval(tsRaw)),
@@ -67,7 +73,10 @@ enum HistoryPacketParser {
             eco2Ppm:      eco2Raw == 0xFFFF ? nil : Int(eco2Raw),
             aqi:          Int(aqiByte),
             status:       statByte,
-            sequence:     seqRaw
+            sequence:     seqRaw,
+            pm1:          GATT.decodePM(pm1Raw),   // 0xFFFF / 0xFFFE → nil (shared rule)
+            pm25:         GATT.decodePM(pm25Raw),
+            pm10:         GATT.decodePM(pm10Raw)
         )
         return Packet(totalCount: totalCount, recordIndex: recordIndex, fields: fields)
     }
