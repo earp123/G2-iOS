@@ -12,14 +12,23 @@ on:
 
 jobs:
   claude:
+    # Gated to owners/members/collaborators: this runs on a self-hosted
+    # runner (your own Mac), so an ungated "@claude" trigger would let
+    # anyone who can comment on a public repo execute on your machine.
+    # Remove the author_association checks if this repo is private and you
+    # don't need the extra gate.
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
-    # This repo is an Xcode/iOS project, so it needs a macOS runner rather
-    # than the installer's ubuntu-latest default.
-    runs-on: macos-latest
+      (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)) ||
+        (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
+      )
+    # Self-hosted macOS x64 runner (registered from your own Mac) rather
+    # than a GitHub-hosted image — labels match what GitHub assigns by
+    # default when you register a macOS/x64 runner. Adjust if you used
+    # custom labels during registration.
+    runs-on: [self-hosted, macOS, X64]
     permissions:
       contents: read
       pull-requests: read
@@ -32,15 +41,8 @@ jobs:
         with:
           fetch-depth: 1
 
-      # Selects a toolchain so Claude can actually run xcodebuild/xcrun/swift
-      # for "@claude build this" / "fix this build error" requests, not just
-      # edit files. Pin an exact xcode-version (e.g. "16.2") instead of
-      # latest-stable for reproducible builds.
-      - name: Select Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
-
+      # Sanity check — self-hosted means whatever Xcode is already installed
+      # on this Mac is used as-is; no toolchain-selection step needed.
       - name: Show toolchain versions
         run: |
           xcodebuild -version
@@ -50,7 +52,7 @@ jobs:
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
           # This is an optional setting that allows Claude to read CI results on PRs
           additional_permissions: |
