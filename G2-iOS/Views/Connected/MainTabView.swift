@@ -19,9 +19,9 @@ struct MainTabView: View {
                 .tabItem { Label("Dashboard", systemImage: "gauge.with.dots.needle.50percent") }
                 .tag(0)
 
-            FanView()
-                .connectedTab("Fan")
-                .tabItem { Label("Fan", systemImage: "fan.fill") }
+            ConditioningView()
+                .connectedTab("Conditioning")
+                .tabItem { Label("Conditioning", systemImage: "air.purifier.fill") }
                 .tag(1)
 
             HistoryView()

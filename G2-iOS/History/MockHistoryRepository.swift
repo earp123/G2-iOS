@@ -90,8 +90,13 @@ final class MockHistoryRepository: HistoryRepository {
             let pm10 = max(0, 14.0 + dayPhase * 8.0 + pmSpike * 1.4 + Double.random(in: -4...4))
 
             let aqi = aqiFor(tvoc: tvoc)
-            // Mostly all-healthy (0x1F); occasionally a sensor read blip clears a bit.
-            let status: UInt8 = Double.random(in: 0...1) < 0.02 ? 0x1D : 0x1F
+            // Bits 0–4: sensor health (mostly all-healthy 0x1F, occasionally a blip)
+            // Bit 6: ionizer power (always on in mock: 0x40)
+            // Bit 5: ionizer health (usually healthy, rarely faulted)
+            let sensorBits: UInt8 = Double.random(in: 0...1) < 0.02 ? 0x1D : 0x1F
+            let ionizerPower: UInt8 = 0x40
+            let ionizerHealth: UInt8 = Double.random(in: 0...1) < 0.05 ? 0x20 : 0x00  // ~5% fault rate
+            let status: UInt8 = sensorBits | ionizerPower | ionizerHealth
 
             // ~3% of samples carry an invalid sentinel on some field (§4.1 gaps).
             let gap = Double.random(in: 0...1) < 0.03
