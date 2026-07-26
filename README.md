@@ -36,7 +36,8 @@ G2-iOS/
     ├── Scan/              Pre-connection device scanner
     ├── Connected/         Tab shell + connection chip
     ├── Dashboard/         Live readings
-    ├── Fan/               Fan control
+    ├── Conditioning/      Fan control + ionizer health (replaces Fan tab)
+    ├── Fan/               Fan control (legacy; use Conditioning instead)
     ├── History/           Chart + drill-down list
     └── Settings/          TVOC threshold editor + diagnostics
 ```
@@ -131,7 +132,7 @@ READ + NOTIFY, **31-byte** payload, little-endian multi-byte fields.
 | 20–21 | +12 | PM10 | `UInt16` LE | raw µg/m³ | `0xFFFF` / `0xFFFE` (via `GATT.decodePM`) |
 | 22 | +14 | AQI level | `UInt8` | `AQILevel(raw:)` 0–5 | n/a |
 | 23 | +15 | Fan speed | `UInt8` | raw 0–100 % | n/a |
-| 24 | +16 | Device status | `UInt8` | `DeviceStatus(raw:)` bitmask | n/a |
+| 24 | +16 | Device status | `UInt8` | `DeviceStatus(raw:)` bitmask (bits 0–5 labeled) | n/a |
 | 25–26 | +17 | Sequence number | `UInt16` LE | raw counter | n/a |
 | 27–30 | +19 | Reserved | — | ignored | — |
 
@@ -140,6 +141,18 @@ The parser length-guards the entire payload before touching any byte:
 guard data.count >= GATT.sensorPayloadLength else { return .failure(.malformedPacket(...)) }
 ```
 A short packet returns `.failure` rather than crashing.
+
+### Device status bitfield (byte 24, decoded by `DeviceStatus`)
+
+| Bit | Label | Meaning |
+|-----|-------|---------|
+| 0 | AHT21 initialised | Temperature/humidity sensor initialized |
+| 1 | AHT21 last read OK | Temperature/humidity sensor last read succeeded |
+| 2 | ENS160 initialised | VOC/CO₂ sensor initialized |
+| 3 | TWAI (CAN) node online | CAN bus node initialized and not bus-off |
+| 4 | BMV080 (PM) measuring | PM sensor opened and actively measuring |
+| 5 | Ionizer healthy | Ionizer operational and healthy |
+| 6–7 | Reserved | Unused — firmware defines no meaning |
 
 ### Command characteristic (`0x7A3E4F5D-…`)
 
