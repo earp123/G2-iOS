@@ -2,9 +2,10 @@
 //  MainTabView.swift
 //  G2-iOS
 //
-//  Connected interface (§3 Phase B): Dashboard · Fan · History · Settings, each in
+//  Connected interface (§3 Phase B): Dashboard · Conditioning · History · Settings, each in
 //  its own NavigationStack with the persistent connection chip. The command-feedback
-//  toast is hosted once over the whole tab view.
+//  toast is hosted once over the whole tab view. Conditioning combines fan control
+//  with ionizer health monitoring (§6.2, §6.3).
 //
 
 import SwiftUI
