@@ -2,10 +2,10 @@
 //  ConditioningView.swift
 //  G2-iOS
 //
-//  Combined air conditioning controls and monitoring: fan speed and ionizer
-//  health. Displays live fan speed and ionizer power state for read-only
-//  monitoring; fan speed is controlled via modes and presets (§6.2, read-only
-//  ionizer per §6.3).
+//  Unified conditioning control (§6.2): combines fan speed control with ionizer
+//  power/health monitoring. Fan control includes Auto, TVOC Auto, and Manual modes
+//  with presets and debounced slider. Ionizer state (off/healthy/faulted) displayed
+//  as read-only status.
 //
 
 import SwiftUI
@@ -18,13 +18,13 @@ struct ConditioningView: View {
     @State private var isDragging = false
 
     private var deviceSpeed: Int { bluetooth.latestReading?.fanSpeedPct ?? 0 }
-    private var ionizeStatus: DeviceStatus? { bluetooth.latestReading?.status }
+    private var deviceStatus: DeviceStatus? { bluetooth.latestReading?.status }
 
     var body: some View {
         ScrollView {
             VStack(spacing: Theme.spacing) {
-                currentSpeedCard
                 ionizeHealthCard
+                currentSpeedCard
                 modePicker
                 if mode == .manual {
                     presetsCard
@@ -41,7 +41,83 @@ struct ConditioningView: View {
         .onChange(of: mode) { _, newMode in applyMode(newMode) }
     }
 
-    // MARK: - Current fan speed (device is source of truth)
+    // MARK: - Ionizer health status
+
+    private var ionizeHealthCard: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Text("IONIZER")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.textSecondary)
+                Spacer()
+                ionizerStateLabel
+            }
+            Divider()
+                .opacity(0.5)
+            Text(ionizerStatusText)
+                .font(.subheadline)
+                .foregroundStyle(Theme.textPrimary)
+                .lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(ionizerStatusColor.opacity(0.12),
+                    in: RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var ionizerStateLabel: some View {
+        if let status = deviceStatus {
+            switch status.ionizerState {
+            case .off:
+                Label("Off", systemImage: "power.off")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.textSecondary)
+            case .healthy:
+                Label("Healthy", systemImage: "checkmark.circle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.green)
+            case .faulted:
+                Label("Faulted", systemImage: "exclamationmark.circle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+            }
+        } else {
+            Label("—", systemImage: "questionmark.circle")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.textSecondary)
+        }
+    }
+
+    private var ionizerStatusText: String {
+        guard let status = deviceStatus else {
+            return "Awaiting reading…"
+        }
+        switch status.ionizerState {
+        case .off:
+            return "Ionizer is powered off"
+        case .healthy:
+            return "Ionizer is operating normally"
+        case .faulted:
+            return "Ionizer has a fault — check device"
+        }
+    }
+
+    private var ionizerStatusColor: Color {
+        guard let status = deviceStatus else {
+            return Theme.textSecondary
+        }
+        switch status.ionizerState {
+        case .off:
+            return Theme.textSecondary
+        case .healthy:
+            return .green
+        case .faulted:
+            return .orange
+        }
+    }
+
+    // MARK: - Fan speed (device is source of truth, §6.2)
 
     private var currentSpeedCard: some View {
         VStack(spacing: 4) {
@@ -62,49 +138,11 @@ struct ConditioningView: View {
                     in: RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
     }
 
-    // MARK: - Ionizer health status
-
-    private var ionizeHealthCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("IONIZER").font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary)
-
-            if let status = ionizeStatus {
-                HStack(spacing: 12) {
-                    Image(systemName: status.ionizeIsHealthy ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .font(.title3)
-                        .foregroundStyle(status.ionizeIsHealthy ? Color.green : Color.orange)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(status.ionizeIsHealthy ? "Healthy" : "Check Status")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(Theme.textPrimary)
-                        Text(status.ionizeIsHealthy ? "Operating normally" : "Ionizer may need attention")
-                            .font(.caption2)
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                    Spacer()
-                }
-                .padding(.vertical, 12)
-                .padding(.horizontal, 12)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            } else {
-                Text("Awaiting status…")
-                    .font(.caption)
-                    .foregroundStyle(Theme.textSecondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 12)
-                    .padding(.horizontal, 12)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            }
-        }
-        .card()
-    }
-
-    // MARK: - Mode picker
+    // MARK: - Mode (§6.2)
 
     private var modePicker: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("FAN MODE").font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary)
+            Text("MODE").font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary)
             Picker("Mode", selection: $mode) {
                 ForEach(FanMode.allCases) { Text($0.title).tag($0) }
             }
@@ -113,7 +151,7 @@ struct ConditioningView: View {
         .card()
     }
 
-    // MARK: - Presets
+    // MARK: - Presets (§6.2 — 25/50/75/100%)
 
     private var presetsCard: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -141,7 +179,7 @@ struct ConditioningView: View {
         .card()
     }
 
-    // MARK: - Manual slider
+    // MARK: - Manual slider (§6.2 — 0x02, debounced on release)
 
     private var sliderCard: some View {
         VStack(alignment: .leading, spacing: 12) {
