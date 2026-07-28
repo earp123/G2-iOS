@@ -20,13 +20,14 @@ struct DeviceStatus: Equatable, Sendable {
     let raw: UInt8
 
     /// Bit → human-readable sensor subsystem (§2.3).
-    // Bits 5–7 are reserved/unused — firmware defines no meaning, so we don't label them.
+    // Bit 5 is reserved for ionizer health, bits 6–7 are reserved/unused.
     private static let labels: [(bit: Int, label: String)] = [
         (0, "AHT21 initialised"),          // temp/humidity initialised
         (1, "AHT21 last read OK"),         // temp/humidity last read succeeded
         (2, "ENS160 initialised"),         // VOC/CO2 initialised
         (3, "TWAI (CAN) node online"),     // initialised AND not bus-off (firmware 2026-07-09)
         (4, "BMV080 (PM) measuring"),      // PM opened and measuring
+        (5, "Ionizer healthy"),            // ionizer operational
     ]
 
     var indicators: [StatusIndicator] {
@@ -37,5 +38,10 @@ struct DeviceStatus: Equatable, Sendable {
                 isOn: raw & (1 << entry.bit) != 0
             )
         }
+    }
+
+    /// Returns whether the ionizer is healthy (bit 5).
+    var ionizeIsHealthy: Bool {
+        raw & (1 << 5) != 0
     }
 }

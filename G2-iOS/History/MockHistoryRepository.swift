@@ -90,8 +90,8 @@ final class MockHistoryRepository: HistoryRepository {
             let pm10 = max(0, 14.0 + dayPhase * 8.0 + pmSpike * 1.4 + Double.random(in: -4...4))
 
             let aqi = aqiFor(tvoc: tvoc)
-            // Mostly all-healthy (0x1F); occasionally a sensor read blip clears a bit.
-            let status: UInt8 = Double.random(in: 0...1) < 0.02 ? 0x1D : 0x1F
+            // Mostly all-healthy (0x3F, bits 0-5 set); occasionally a sensor read blip clears a bit.
+            let status: UInt8 = Double.random(in: 0...1) < 0.02 ? 0x3D : 0x3F
 
             // ~3% of samples carry an invalid sentinel on some field (§4.1 gaps).
             let gap = Double.random(in: 0...1) < 0.03

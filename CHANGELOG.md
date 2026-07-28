@@ -17,6 +17,25 @@ the app version tracks [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] — targeting 1.0.0
 
+### Ionizer power/health state monitoring
+
+#### Added
+- **Ionizer health bit** (DeviceStatus bit 5) — read-only monitoring of ionizer
+  operational status. Status byte bit 5 = 1 indicates the ionizer is healthy
+  and operational.
+- **Conditioning tab** (replaces Fan tab in MainTabView) — combines fan speed
+  control with ionizer health display. Provides unified air-conditioning
+  control and monitoring surface.
+- **ConditioningView** — shows current fan speed, fan control modes (Auto,
+  TVOC Auto, Manual), and ionizer health status card with visual indicators.
+  Fan control is the same as the legacy FanView; ionizer is read-only per
+  spec.
+
+#### Changed
+- **MainTabView** now shows "Conditioning" tab instead of "Fan" (SystemImage
+  `air.purifier.fill`). The legacy FanView remains in Views/Fan/ for
+  backward compatibility but is not used in the main UI.
+
 ### Incremental sync, per-device caching, background persistence
 
 > Matches the firmware's reworked history protocol (`BLE_HISTORY_PROTOCOL.md`):

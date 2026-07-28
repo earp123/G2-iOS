@@ -756,7 +756,7 @@ extension BluetoothManager {
             pm10: injectSentinel ? nil : pm10,
             aqi: injectSentinel ? 0 : aqi,
             fan: simFanSpeed,
-            status: 0x1F,                 // all sensors healthy
+            status: 0x3F,                 // all sensors and ionizer healthy (bits 0–5)
             sequence: simSequence
         )
         simSequence = simSequence &+ 1
