@@ -2,7 +2,7 @@
 //  GATT.swift
 //  G2-iOS
 //
-//  Authoritative GEUE Air Quality (G2) BLE GATT contract.
+//  Authoritative Smart Air System (G2) BLE GATT contract.
 //
 //  ⚠️ SOURCE OF TRUTH — these values mirror shipped ESP32-S3 firmware.
 //  Do NOT change, guess, or "improve" any UUID, opcode, byte offset, scaling
@@ -11,7 +11,7 @@
 
 import CoreBluetooth
 
-/// All identifiers and constants for the GEUE Air Quality GATT interface (§2).
+/// All identifiers and constants for the Smart Air System GATT interface (§2).
 ///
 /// `nonisolated` so the constants can be read from CoreBluetooth's dedicated-queue
 /// (nonisolated) delegate callbacks. The CBUUID values are immutable, hence the
@@ -19,7 +19,7 @@ import CoreBluetooth
 nonisolated enum GATT {
 
     /// Advertised local name (§2.1).
-    static let advertisedName = "GEUE Air Quality"
+    static let advertisedName = "Smart Air System"
 
     /// Primary service — scan filters on this UUID (§2.1 / §2.2).
     nonisolated(unsafe) static let serviceUUID = CBUUID(string: "7A3E4F5B-8C2D-4E9A-B1F6-0D3C5E7F9A2B")

@@ -256,7 +256,8 @@
 				DEVELOPMENT_TEAM = 742QW9KJUK;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "GEUE Air Quality uses Bluetooth to connect to your air-quality monitor and stream live readings.";
+				INFOPLIST_KEY_CFBundleDisplayName = "Smart Air System";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Smart Air System uses Bluetooth to connect to your air-quality monitor and stream live readings.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -290,7 +291,8 @@
 				DEVELOPMENT_TEAM = 742QW9KJUK;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "GEUE Air Quality uses Bluetooth to connect to your air-quality monitor and stream live readings.";
+				INFOPLIST_KEY_CFBundleDisplayName = "Smart Air System";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Smart Air System uses Bluetooth to connect to your air-quality monitor and stream live readings.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

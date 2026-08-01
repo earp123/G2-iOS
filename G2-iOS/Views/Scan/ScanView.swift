@@ -19,7 +19,7 @@ struct ScanView: View {
                 content
                 connectingOverlay
             }
-            .navigationTitle("GEUE Air Quality")
+            .navigationTitle("Smart Air System")
             .toolbarBackground(Theme.background, for: .navigationBar)
         }
         .onChange(of: bluetooth.availability) { _, new in
@@ -64,7 +64,7 @@ struct ScanView: View {
             Text("Connect your monitor")
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.textPrimary)
-            Text("Scan for nearby GEUE Air Quality devices over Bluetooth.")
+            Text("Scan for nearby Smart Air System devices over Bluetooth.")
                 .font(.subheadline)
                 .foregroundStyle(Theme.textSecondary)
                 .multilineTextAlignment(.center)
@@ -123,7 +123,7 @@ struct ScanView: View {
         } else if bluetooth.scanState == .scanning {
             emptyState(icon: "dot.radiowaves.left.and.right",
                        title: "Searching…",
-                       message: "Looking for GEUE Air Quality units in range.")
+                       message: "Looking for Smart Air System units in range.")
         } else if bluetooth.scanState == .noResults {
             emptyState(icon: "magnifyingglass",
                        title: "No monitors found",

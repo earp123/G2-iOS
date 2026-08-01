@@ -1,6 +1,6 @@
-# GEUE Smart Air Monitor — iOS App
+# Smart Air System — iOS App
 
-SwiftUI rebuild of the GEUE Air Quality (G2) iOS client.  
+SwiftUI rebuild of the Smart Air System (G2) iOS client.  
 Target: **iOS 17.0+**, **Swift 6 strict concurrency**, zero third-party dependencies.
 
 ---

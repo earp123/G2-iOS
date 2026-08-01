@@ -21,7 +21,7 @@ enum AQILevel: Int, CaseIterable, Sendable {
         self = AQILevel(rawValue: Int(raw)) ?? .warmingUp
     }
 
-    var label: String {
+    nonisolated var label: String {
         switch self {
         case .warmingUp: "Warming up"
         case .excellent: "Excellent"
@@ -33,7 +33,7 @@ enum AQILevel: Int, CaseIterable, Sendable {
     }
 
     /// True when the index is a real reading (not the 0 warming-up sentinel).
-    var isValid: Bool { self != .warmingUp }
+    nonisolated var isValid: Bool { self != .warmingUp }
 
     /// AQI color semantics — green (good) → red (unhealthy) (§6).
     var color: Color {

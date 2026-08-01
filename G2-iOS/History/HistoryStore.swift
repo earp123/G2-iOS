@@ -32,7 +32,7 @@ final class HistoryStore {
     static let listLimit = 200
 
     private let repository: HistoryRepository
-    private let dataStore: HistoryDataStore
+    let dataStore: HistoryDataStore
     private let listContext: ModelContext   // main-actor context for List rows
 
     var selectedMetric: HistoryMetric = .tvoc {
@@ -52,6 +52,7 @@ final class HistoryStore {
     private(set) var syncState: SyncState = .idle
     /// 0…1 while a sized stream is running, nil otherwise.
     private(set) var syncProgress: Double?
+    private(set) var exportCutoff: Date?
 
     var sourceLabel: String { repository.sourceLabel }
     var activeDeviceID: String? { repository.activeDeviceID }
@@ -87,6 +88,16 @@ final class HistoryStore {
 
     func clearSyncResult() { syncState = .idle }
 
+    func csvExport(scoped: Bool) -> HistoryCSVExport? {
+        guard let deviceID = activeDeviceID else { return nil }
+        return HistoryCSVExport(
+            dataStore: dataStore,
+            deviceID: deviceID,
+            cutoff: scoped ? exportCutoff : nil,
+            scopeLabel: scoped ? selectedRange.rawValue : "all"
+        )
+    }
+
     // MARK: - Derived-state refresh
 
     /// Recomputes list/count on the main context (cheap, row-limited) and chart
@@ -107,6 +118,7 @@ final class HistoryStore {
             // Anchor the window to the newest logged record (not wall clock).
             let anchor = (try? await self.dataStore.newestTimestamp(deviceID: deviceID)) ?? Date()
             let cutoff = anchor.addingTimeInterval(-range.duration)
+            self.exportCutoff = cutoff
             if Task.isCancelled { return }
 
             if !chartsOnly {
@@ -156,5 +168,6 @@ final class HistoryStore {
         listRecords = []
         totalInRange = 0
         hasData = false
+        exportCutoff = nil
     }
 }
