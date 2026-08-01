@@ -49,7 +49,7 @@ struct HistoryView: View {
         }
         .background(Theme.background)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
+            ToolbarItemGroup(placement: .topBarLeading) {
                 Button {
                     Task { await history.sync() }
                 } label: {
@@ -61,6 +61,28 @@ struct HistoryView: View {
                 }
                 .disabled(history.syncState == .syncing)
                 .accessibilityLabel("Sync history from device")
+
+                Menu {
+                    if let scoped = history.csvExport(scoped: true) {
+                        ShareLink(item: scoped,
+                                  preview: SharePreview(scoped.filename,
+                                                        image: Image(systemName: "tablecells"))) {
+                            Label("Selected range (\(history.selectedRange.rawValue))",
+                                  systemImage: "calendar")
+                        }
+                    }
+                    if let all = history.csvExport(scoped: false) {
+                        ShareLink(item: all,
+                                  preview: SharePreview(all.filename,
+                                                        image: Image(systemName: "tablecells"))) {
+                            Label("All cached history", systemImage: "externaldrive")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .disabled(!history.hasData || history.activeDeviceID == nil)
+                .accessibilityLabel("Export history")
             }
         }
         .task { history.loadIfNeeded() }

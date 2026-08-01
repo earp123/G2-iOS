@@ -1,6 +1,6 @@
 //
 //  G2_iOSApp.swift
-//  G2-iOS — GEUE Air Quality (G2) client
+//  G2-iOS — Smart Air System (G2) client
 //
 //  Composition root: builds the SwiftData container, the single BluetoothManager,
 //  and the history layer behind a DI switch (mock vs BLE, §4.1).

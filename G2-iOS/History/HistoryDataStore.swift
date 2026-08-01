@@ -157,4 +157,89 @@ actor HistoryDataStore {
             .map { ChartPoint(date: $0.anchor, value: $0.total / Double($0.count)) }
             .sorted { $0.date < $1.date }
     }
+
+    func exportCSV(deviceID: String, cutoff: Date?, filename: String) throws -> URL {
+        let exportDir = FileManager.default.temporaryDirectory
+            .appending(path: "HistoryExports", directoryHint: .isDirectory)
+        try? FileManager.default.removeItem(at: exportDir)
+        try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
+
+        let fileURL = exportDir.appending(path: filename)
+        FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+
+        let utcFormatter = ISO8601DateFormatter()
+        utcFormatter.formatOptions = [.withInternetDateTime]
+        utcFormatter.timeZone = TimeZone(abbreviation: "UTC")
+
+        let localFormatter = DateFormatter()
+        localFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        localFormatter.locale = Locale(identifier: "en_US_POSIX")
+        localFormatter.timeZone = .current
+
+        let header = "timestamp_utc,timestamp_local,device_id,sequence,temperature_c,temperature_f,humidity_pct,tvoc_ppb,eco2_ppm,aqi,aqi_label,pm1_ugm3,pm25_ugm3,pm10_ugm3,status_hex,aht21_init,aht21_read_ok,ens160_init,can_online,pm_measuring,ionizer_healthy,ionizer_on\r\n"
+
+        let handle = try FileHandle(forWritingTo: fileURL)
+        defer { try? handle.close() }
+
+        try handle.write(contentsOf: header.data(using: .utf8) ?? Data())
+
+        var descriptor: FetchDescriptor<HistoryRecord>
+        if let cutoff {
+            descriptor = FetchDescriptor(
+                predicate: #Predicate { $0.deviceID == deviceID && $0.timestamp >= cutoff },
+                sortBy: [SortDescriptor(\.timestamp, order: .forward)]
+            )
+        } else {
+            descriptor = FetchDescriptor(
+                predicate: #Predicate { $0.deviceID == deviceID },
+                sortBy: [SortDescriptor(\.timestamp, order: .forward)]
+            )
+        }
+        descriptor.fetchLimit = Self.fetchChunk
+
+        var offset = 0
+        while true {
+            descriptor.fetchOffset = offset
+            let chunk = try modelContext.fetch(descriptor)
+
+            var csvLines = ""
+            for record in chunk {
+                let tempF = record.temperatureC.map { $0 * 9 / 5 + 32 }
+                let fields: [String] = [
+                    utcFormatter.string(from: record.timestamp),
+                    localFormatter.string(from: record.timestamp),
+                    record.deviceID,
+                    String(record.sequence),
+                    record.temperatureC.map { String(format: "%.1f", $0) } ?? "",
+                    tempF.map { String(format: "%.1f", $0) } ?? "",
+                    record.humidityPct.map { String(format: "%.1f", $0) } ?? "",
+                    record.tvocPpb.map(String.init) ?? "",
+                    record.eco2Ppm.map(String.init) ?? "",
+                    String(record.aqi),
+                    record.aqiLevel.label,
+                    record.pm1.map(String.init) ?? "",
+                    record.pm25.map(String.init) ?? "",
+                    record.pm10.map(String.init) ?? "",
+                    String(format: "0x%02X", record.status),
+                    String(record.deviceStatus.indicators[0].isOn ? 1 : 0),
+                    String(record.deviceStatus.indicators[1].isOn ? 1 : 0),
+                    String(record.deviceStatus.indicators[2].isOn ? 1 : 0),
+                    String(record.deviceStatus.indicators[3].isOn ? 1 : 0),
+                    String(record.deviceStatus.indicators[4].isOn ? 1 : 0),
+                    String(record.deviceStatus.ionizerIsHealthy ? 1 : 0),
+                    String(record.deviceStatus.ionizerIsOn ? 1 : 0)
+                ]
+                csvLines += fields.joined(separator: ",") + "\r\n"
+            }
+
+            if !csvLines.isEmpty {
+                try handle.write(contentsOf: csvLines.data(using: .utf8) ?? Data())
+            }
+
+            if chunk.count < Self.fetchChunk { break }
+            offset += chunk.count
+        }
+
+        return fileURL
+    }
 }

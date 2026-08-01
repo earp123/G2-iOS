@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the **GEUE Smart Air Monitor** iOS client.
+All notable changes to the **Smart Air System** iOS client.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the app version tracks [Semantic Versioning](https://semver.org/).
 
@@ -16,6 +16,20 @@ the app version tracks [Semantic Versioning](https://semver.org/).
 ---
 
 ## [Unreleased] — targeting 1.0.0
+
+### History CSV export and branding update
+
+#### Added
+- **History CSV export** — tap the share icon in the History tab to export
+  cached records as a `.csv` file. Choose scope: selected time range (24h/7d/30d/60d)
+  or all cached history. File is streamed in 4000-row chunks to keep memory
+  footprint flat even over a full 90-day cache. Exported file name includes
+  device ID, scope, and export timestamp.
+
+#### Changed
+- **Product branding** — renamed from "GEUE Air Quality" to "Smart Air System"
+  throughout the UI (home screen, scan screen, Bluetooth permission strings,
+  settings pane references). Internal identifiers and bundle ID are unchanged.
 
 ### Ionizer power/health state monitoring
 

@@ -48,7 +48,7 @@ enum BluetoothAvailability: Equatable, Sendable {
         switch self {
         case .unknown:      "Preparing Bluetooth…"
         case .poweredOff:   "Bluetooth is off. Turn it on in Settings or Control Center to scan for your monitor."
-        case .unauthorized: "GEUE Air Quality needs Bluetooth permission. Enable it in Settings › GEUE Air Quality."
+        case .unauthorized: "Smart Air System needs Bluetooth permission. Enable it in Settings › Smart Air System."
         case .unsupported:  "This device doesn’t support Bluetooth Low Energy."
         case .ready:        nil
         }

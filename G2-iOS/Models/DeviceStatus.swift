@@ -21,7 +21,7 @@ struct DeviceStatus: Equatable, Sendable {
 
     /// Bit → human-readable sensor subsystem (§2.3).
     // Bits 7 is reserved/unused — firmware defines no meaning, so we don't label it.
-    private static let labels: [(bit: Int, label: String)] = [
+    private nonisolated static let labels: [(bit: Int, label: String)] = [
         (0, "AHT21 initialised"),          // temp/humidity initialised
         (1, "AHT21 last read OK"),         // temp/humidity last read succeeded
         (2, "ENS160 initialised"),         // VOC/CO2 initialised
@@ -31,7 +31,7 @@ struct DeviceStatus: Equatable, Sendable {
         (6, "Ionizer power"),              // Ionizer power (0=off, 1=on)
     ]
 
-    var indicators: [StatusIndicator] {
+    nonisolated var indicators: [StatusIndicator] {
         Self.labels.map { entry in
             StatusIndicator(
                 bit: entry.bit,
@@ -42,13 +42,13 @@ struct DeviceStatus: Equatable, Sendable {
     }
 
     /// Ionizer power state (bit 6, 0x40).
-    var ionizerIsOn: Bool {
+    nonisolated var ionizerIsOn: Bool {
         (raw & 0x40) != 0
     }
 
     /// Ionizer health status (bit 5, 0x20). Only meaningful when ionizerIsOn is true.
     /// Returns true if ionizer is healthy, false if faulted.
-    var ionizerIsHealthy: Bool {
+    nonisolated var ionizerIsHealthy: Bool {
         (raw & 0x20) == 0   // bit5=0 means healthy, bit5=1 means faulted
     }
 
@@ -59,7 +59,7 @@ struct DeviceStatus: Equatable, Sendable {
         case faulted
     }
 
-    var ionizerState: IonizerState {
+    nonisolated var ionizerState: IonizerState {
         guard ionizerIsOn else { return .off }
         return ionizerIsHealthy ? .healthy : .faulted
     }
