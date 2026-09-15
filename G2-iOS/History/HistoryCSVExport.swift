@@ -2,37 +2,43 @@
 //  HistoryCSVExport.swift
 //  G2-iOS
 //
-//  Transferable descriptor for CSV export via the system share sheet.
+//  CSV export support: the finished-file descriptor plus the system share sheet
+//  that presents it. The CSV is fully written by HistoryDataStore.exportCSV
+//  *before* the sheet appears — an earlier revision generated it lazily inside a
+//  Transferable FileRepresentation, which let share targets (Mail especially)
+//  intermittently receive an unready file.
 //
 
-import Foundation
-import CoreTransferable
-import UniformTypeIdentifiers
+import SwiftUI
+import UIKit
 
-nonisolated struct HistoryCSVExport: Transferable, Sendable {
-    let dataStore: HistoryDataStore
-    let deviceID: String
-    let cutoff: Date?
-    let scopeLabel: String
+/// A finished, on-disk CSV export ready to hand to the share sheet.
+struct HistoryCSVFile: Identifiable, Sendable {
+    let url: URL
+    var id: URL { url }
+    var filename: String { url.lastPathComponent }
 
-    var filename: String {
+    /// Stable name computed once per export:
+    /// SmartAirSystem_<device>_<scope>_<local timestamp>.csv
+    static func filename(deviceID: String, scopeLabel: String, date: Date = Date()) -> String {
         let sanitized = deviceID.filter { $0.isLetter || $0.isNumber }
         let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd-HHmm"
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = .current
-        let timestamp = formatter.string(from: Date())
-        return "SmartAirSystem_\(sanitized)_\(scopeLabel)_\(timestamp).csv"
+        return "SmartAirSystem_\(sanitized)_\(scopeLabel)_\(formatter.string(from: date)).csv"
+    }
+}
+
+/// System share sheet (UIActivityViewController) for a finished file. Receives a
+/// real URL, so every target — Mail, Files, AirDrop — gets a complete attachment
+/// with the proper filename.
+struct HistoryShareSheet: UIViewControllerRepresentable {
+    let file: HistoryCSVFile
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [file.url], applicationActivities: nil)
     }
 
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(exportedContentType: .commaSeparatedText) { export in
-            let url = try await export.dataStore.exportCSV(
-                deviceID: export.deviceID,
-                cutoff: export.cutoff,
-                filename: export.filename
-            )
-            return SentTransferredFile(url)
-        }
-    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

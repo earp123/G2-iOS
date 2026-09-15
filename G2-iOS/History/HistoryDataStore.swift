@@ -158,10 +158,17 @@ actor HistoryDataStore {
             .sorted { $0.date < $1.date }
     }
 
+    /// Streams the device's records into a CSV file and returns its URL. Each
+    /// export writes into its own unique subdirectory, so a new export can never
+    /// delete a file a still-open share sheet is reading (the earlier version
+    /// wiped the whole export folder every call — an intermittent-failure race).
+    /// Exports older than an hour are cleaned up opportunistically instead.
     func exportCSV(deviceID: String, cutoff: Date?, filename: String) throws -> URL {
-        let exportDir = FileManager.default.temporaryDirectory
+        let root = FileManager.default.temporaryDirectory
             .appending(path: "HistoryExports", directoryHint: .isDirectory)
-        try? FileManager.default.removeItem(at: exportDir)
+        Self.cleanUpStaleExports(in: root)
+
+        let exportDir = root.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
 
         let fileURL = exportDir.appending(path: filename)
@@ -241,5 +248,19 @@ actor HistoryDataStore {
         }
 
         return fileURL
+    }
+
+    /// Best-effort removal of past export subdirectories old enough that no
+    /// share sheet can still be reading from them.
+    private static func cleanUpStaleExports(in root: URL) {
+        let fm = FileManager.default
+        guard let children = try? fm.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        let staleBefore = Date().addingTimeInterval(-3_600)
+        for child in children {
+            let modified = (try? child.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate) ?? .distantPast
+            if modified < staleBefore { try? fm.removeItem(at: child) }
+        }
     }
 }

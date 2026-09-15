@@ -63,27 +63,42 @@ struct HistoryView: View {
                 .accessibilityLabel("Sync history from device")
 
                 Menu {
-                    if let scoped = history.csvExport(scoped: true) {
-                        ShareLink(item: scoped,
-                                  preview: SharePreview(scoped.filename,
-                                                        image: Image(systemName: "tablecells"))) {
-                            Label("Selected range (\(history.selectedRange.rawValue))",
-                                  systemImage: "calendar")
-                        }
+                    Button {
+                        Task { await history.exportCSV(scoped: true) }
+                    } label: {
+                        Label("Selected range (\(history.selectedRange.rawValue))",
+                              systemImage: "calendar")
                     }
-                    if let all = history.csvExport(scoped: false) {
-                        ShareLink(item: all,
-                                  preview: SharePreview(all.filename,
-                                                        image: Image(systemName: "tablecells"))) {
-                            Label("All cached history", systemImage: "externaldrive")
-                        }
+                    Button {
+                        Task { await history.exportCSV(scoped: false) }
+                    } label: {
+                        Label("All cached history", systemImage: "externaldrive")
                     }
                 } label: {
-                    Image(systemName: "square.and.arrow.up")
+                    if history.isExporting {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "square.and.arrow.up")
+                    }
                 }
-                .disabled(!history.hasData || history.activeDeviceID == nil)
+                .disabled(!history.hasData || history.activeDeviceID == nil || history.isExporting)
                 .accessibilityLabel("Export history")
             }
+        }
+        // The share sheet gets a fully written file — export completes first, so
+        // Mail/Files/AirDrop always receive a complete attachment.
+        .sheet(item: $history.exportedFile) { file in
+            HistoryShareSheet(file: file)
+                .presentationDetents([.medium, .large])
+                .ignoresSafeArea(edges: .bottom)
+        }
+        .alert("Export failed", isPresented: Binding(
+            get: { history.exportError != nil },
+            set: { if !$0 { history.clearExportError() } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(history.exportError ?? "")
         }
         .task { history.loadIfNeeded() }
     }

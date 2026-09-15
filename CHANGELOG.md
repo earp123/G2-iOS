@@ -26,6 +26,18 @@ the app version tracks [Semantic Versioning](https://semver.org/).
   footprint flat even over a full 90-day cache. Exported file name includes
   device ID, scope, and export timestamp.
 
+#### Fixed
+- **CSV share reliability.** The original share flow generated the file lazily
+  inside a Transferable provider *after* a share target was picked, which let
+  targets (Mail especially) intermittently receive an unready file; it also
+  wiped the whole export folder on every run (racing any still-open share
+  sheet) and recomputed the filename per access. The export now fully writes
+  the CSV first (toolbar spinner while it streams), into a unique per-export
+  folder with hourly stale cleanup, then presents the system share sheet with
+  the finished file; failures surface in an alert. Verified in Simulator:
+  full export (5,760 rows), scoped 24h export (97 rows), and back-to-back
+  exports leaving the earlier file intact.
+
 #### Changed
 - **Product branding** — renamed from "GEUE Air Quality" to "Smart Air System"
   throughout the UI (home screen, scan screen, Bluetooth permission strings,

@@ -32,7 +32,7 @@ final class HistoryStore {
     static let listLimit = 200
 
     private let repository: HistoryRepository
-    let dataStore: HistoryDataStore
+    private let dataStore: HistoryDataStore
     private let listContext: ModelContext   // main-actor context for List rows
 
     var selectedMetric: HistoryMetric = .tvoc {
@@ -53,6 +53,12 @@ final class HistoryStore {
     /// 0…1 while a sized stream is running, nil otherwise.
     private(set) var syncProgress: Double?
     private(set) var exportCutoff: Date?
+
+    // CSV export state. The view presents the share sheet when `exportedFile`
+    // lands (and clears it on dismiss via the sheet binding).
+    private(set) var isExporting = false
+    var exportedFile: HistoryCSVFile?
+    private(set) var exportError: String?
 
     var sourceLabel: String { repository.sourceLabel }
     var activeDeviceID: String? { repository.activeDeviceID }
@@ -88,15 +94,31 @@ final class HistoryStore {
 
     func clearSyncResult() { syncState = .idle }
 
-    func csvExport(scoped: Bool) -> HistoryCSVExport? {
-        guard let deviceID = activeDeviceID else { return nil }
-        return HistoryCSVExport(
-            dataStore: dataStore,
+    /// Generates the CSV on the data-store actor, then hands the finished file
+    /// to the view for the share sheet. `scoped` limits rows to the selected
+    /// range (via the cached anchored cutoff); otherwise all cached history.
+    func exportCSV(scoped: Bool) async {
+        guard let deviceID = activeDeviceID, !isExporting else { return }
+        isExporting = true
+        defer { isExporting = false }
+
+        let filename = HistoryCSVFile.filename(
             deviceID: deviceID,
-            cutoff: scoped ? exportCutoff : nil,
             scopeLabel: scoped ? selectedRange.rawValue : "all"
         )
+        do {
+            let url = try await dataStore.exportCSV(
+                deviceID: deviceID,
+                cutoff: scoped ? exportCutoff : nil,
+                filename: filename
+            )
+            exportedFile = HistoryCSVFile(url: url)
+        } catch {
+            exportError = "Couldn't export history: \(error.localizedDescription)"
+        }
     }
+
+    func clearExportError() { exportError = nil }
 
     // MARK: - Derived-state refresh
 
