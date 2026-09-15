@@ -571,7 +571,11 @@ final class BluetoothManager: NSObject {
         let p = box.peripheral
         phase = .discovering
         p.discoverServices([GATT.serviceUUID])
-        mtu = p.maximumWriteValueLength(for: .withoutResponse) + 3   // ATT MTU ≈ payload + 3
+        // MTU is deliberately NOT sampled here. iOS performs the ATT MTU exchange
+        // asynchronously after the connection completes, so at this instant
+        // `maximumWriteValueLength` still reports the 23-byte default and would
+        // pin a wrong value in the UI. It is read once the link is fully up, and
+        // refreshed by the RSSI poller until it settles (notes §8).
     }
 
     private func handleDisconnect(error: String?) {
@@ -632,6 +636,7 @@ final class BluetoothManager: NSObject {
         guard kind == .sensor else { return }
         if isNotifying, phase == .discovering {
             phase = .connected          // connect + discovery + CCCD subscription complete (§3)
+            refreshMTU()
             startRSSIPolling()
         }
     }
@@ -708,12 +713,25 @@ final class BluetoothManager: NSObject {
 
     private func handleRSSIRead(_ rssi: Int) { liveRSSI = rssi }
 
+    /// Reads the negotiated ATT MTU. CoreBluetooth exposes no MTU property, so it
+    /// is inferred from the largest write-without-response payload, which is
+    /// `ATT_MTU - 3`. The exchange completes asynchronously after connecting, so
+    /// this is sampled once the link is up and then refreshed on the RSSI tick
+    /// until it stops changing — a single early read reports the 23-byte default
+    /// and never corrects itself (notes §8).
+    private func refreshMTU() {
+        guard let p = connectedPeripheral else { return }
+        let sampled = p.maximumWriteValueLength(for: .withoutResponse) + 3
+        if mtu != sampled { mtu = sampled }
+    }
+
     private func startRSSIPolling() {
         rssiPoller?.cancel()
         rssiPoller = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self, let p = self.connectedPeripheral else { return }
                 p.readRSSI()
+                self.refreshMTU()   // converges once the ATT exchange settles
                 try? await Task.sleep(for: .seconds(3))
             }
         }

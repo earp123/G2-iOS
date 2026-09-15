@@ -106,7 +106,10 @@ live-only, never logged.
 - **Sensor-disconnected state.** Status bit 0 clear now reads as "Sensor
   disconnected" instead of a screen of dashes presented as readings.
 - **MTU guard** in diagnostics: the 52-byte packet needs an ATT MTU of at least
-  55, and a smaller negotiated value is flagged red.
+  55, and a smaller negotiated value is flagged red. The value is sampled once
+  the link is fully up and refreshed on the RSSI tick — sampling it at
+  `didConnect`, as the first revision did, always reported the 23-byte default
+  because iOS performs the ATT MTU exchange asynchronously after connecting.
 - **Golden-vector test target** (`G2-iOSTests`, Swift Testing) — see Tests below.
 
 #### Changed
