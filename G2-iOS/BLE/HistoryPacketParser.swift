@@ -58,7 +58,10 @@ enum HistoryPacketParser {
     /// 31-byte packet from pre-SEN66 firmware.
     static func parse(_ data: Data) -> Packet? {
         let b = [UInt8](data)
-        guard b.count >= GATT.historyPacketLength,
+        // Exact length, per the firmware note's guard (`count == 34`): length is
+        // what separates a v2 packet from the retired 31-byte v1 one, so anything
+        // else is rejected rather than decoded from its first 34 bytes.
+        guard b.count == GATT.historyPacketLength,
               b[0] == GATT.historyPacketMarker,
               b[1] == GATT.historyHeaderMarker else { return nil }
 

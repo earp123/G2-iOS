@@ -331,6 +331,14 @@ final class BluetoothManager: NSObject {
     /// app sends 400 ppm (clean outdoor air); firmware rejects anything outside
     /// 350–2000 ppm. The sensor must have been outdoors for at least 3 minutes.
     func sendCO2Recalibration(ppm: UInt16 = GATT.co2RecalibrationReferencePpm) {
+        // Firmware rejects anything outside this window with an ATT error, so the
+        // write is never attempted with a value it would refuse (notes §4).
+        guard GATT.co2RecalibrationRange.contains(ppm) else {
+            commandFeedback = .rejected(
+                "CO₂ reference must be between \(GATT.co2RecalibrationRange.lowerBound) and "
+                + "\(GATT.co2RecalibrationRange.upperBound) ppm.")
+            return
+        }
         #if targetEnvironment(simulator)
         commandFeedback = .succeeded("CO₂ recalibrated to \(ppm) ppm.")
         #else
@@ -791,9 +799,14 @@ extension BluetoothManager: CBCentralManagerDelegate {
                                     didDiscover peripheral: CBPeripheral,
                                     advertisementData: [String: Any],
                                     rssi RSSI: NSNumber) {
-        // Prefer the advertised local name; fall back to the GATT device name.
+        // Advertised local name only — it is fresh per advertisement. Deliberately
+        // NOT `peripheral.name`: iOS caches that, and it can keep showing a unit's
+        // OLD nickname for the lifetime of the app install (notes §6 / §9). When a
+        // peripheral advertises no local name we show the neutral product label;
+        // the row also carries the identifier suffix to tell units apart.
         let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
-            ?? peripheral.name
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 }
             ?? GATT.advertisedName
         let box = PeripheralBox(peripheral: peripheral)
         let rssi = RSSI.intValue

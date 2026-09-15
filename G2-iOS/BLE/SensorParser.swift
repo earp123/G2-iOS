@@ -17,7 +17,7 @@
 import Foundation
 
 enum SensorParseError: Error, Equatable, Sendable {
-    /// Payload shorter than the required 52 bytes (§1.1 / §7).
+    /// Payload is not exactly 52 bytes (§1.1 / §7).
     case malformedPacket(length: Int)
     /// Byte 0 was not the live-v2 marker. Carries the marker actually seen, so a
     /// legacy `0x02` device is identifiable from the message (§1.1).
@@ -29,7 +29,7 @@ enum SensorParseError: Error, Equatable, Sendable {
     var message: String {
         switch self {
         case .malformedPacket(let length):
-            "Malformed packet (\(length) bytes, expected \(GATT.sensorPayloadLength))"
+            "Malformed packet (\(length) bytes, expected exactly \(GATT.sensorPayloadLength))"
         case .unsupportedMarker(let marker) where marker == GATT.legacyLivePacketMarker:
             "Device is running pre-SEN66 firmware (legacy 0x02 packet) — update required"
         case .unsupportedMarker(let marker):
@@ -46,8 +46,11 @@ enum SensorParser {
     ///
     /// - Parameter receivedAt: timestamp to stamp on the reading (injectable for tests).
     static func parse(_ data: Data, receivedAt: Date = Date()) -> Result<SensorReading, SensorParseError> {
-        // Length-check before touching any byte (§7 — never crash on short packets).
-        guard data.count >= GATT.sensorPayloadLength else {
+        // Exact-length check before touching any byte (§7 — never crash on short
+        // packets). The firmware note prescribes `count == 52`, not a minimum: a
+        // longer payload is a contract violation and is reported rather than
+        // silently trimmed to the first 52 bytes (notes §9).
+        guard data.count == GATT.sensorPayloadLength else {
             return .failure(.malformedPacket(length: data.count))
         }
 

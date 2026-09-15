@@ -143,5 +143,11 @@ struct HistoryPacketParserTests {
         let bytes = [UInt8](GoldenVectors.historyPacket.prefix(length))
         #expect(HistoryPacketParser.parse(GoldenVectors.data(bytes)) == nil)
     }
+
+    @Test("A history payload longer than 34 bytes is rejected, not trimmed")
+    func longHistoryPayloadRejected() {
+        let bytes = GoldenVectors.historyPacket + [0x00, 0x00]
+        #expect(HistoryPacketParser.parse(GoldenVectors.data(bytes)) == nil)
+    }
 }
 

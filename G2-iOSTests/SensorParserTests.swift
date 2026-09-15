@@ -202,11 +202,13 @@ struct SensorParserTests {
         #expect(SensorParser.parse(GoldenVectors.data(bytes)) == .failure(.malformedPacket(length: length)))
     }
 
-    @Test("A payload longer than 52 bytes still decodes — trailing bytes are ignored")
-    func longPayloadDecodes() throws {
-        let r = try parsed(GoldenVectors.validLivePacket + [0xAA, 0xBB])
-        #expect(r.sequence == 4660)
-        #expect(r.vocIndex.value == 123.4)
+    @Test("A payload longer than 52 bytes is rejected, not trimmed")
+    func longPayloadRejected() {
+        // The firmware note guards on `count == 52`. A longer payload means the
+        // contract broke somewhere, so it is reported rather than silently
+        // decoded from its first 52 bytes (notes §9).
+        let bytes = GoldenVectors.validLivePacket + [0xAA, 0xBB]
+        #expect(SensorParser.parse(GoldenVectors.data(bytes)) == .failure(.malformedPacket(length: 54)))
     }
 
     @Test("A Data slice with a non-zero start index decodes from the right offset")
@@ -214,7 +216,7 @@ struct SensorParserTests {
         // Guards the [UInt8](data) normalisation: a sliced Data keeps the parent's
         // indices, so fixed offsets would read the wrong bytes without it.
         let padded = Data([0xDE, 0xAD]) + GoldenVectors.data(GoldenVectors.validLivePacket)
-        let slice = padded.dropFirst(2)
+        let slice = padded.dropFirst(2)   // 52 bytes, but startIndex == 2
         guard case .success(let r) = SensorParser.parse(slice) else {
             Issue.record("a sliced payload must decode identically")
             return

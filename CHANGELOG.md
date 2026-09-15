@@ -25,7 +25,10 @@ with SPS30-era firmware**. It requires firmware branch `SEN66` of
 A v1 device is detected on connect and refused rather than mis-decoded.
 
 Contract verified byte-for-byte against firmware `docs/sen66-migration.md` §6 and
-`docs/gatt-v2-ios-notes.md` (firmware commit `18746cd`).
+the iOS handoff note `docs/gatt-v2-ios-notes.md` (firmware commit `18746cd`,
+SHA-256 `83a95696…`): 144 machine-checked assertions over every byte offset,
+scale divisor, sentinel, marker, length, opcode, status bit and UUID, plus all
+17 behavioural requirements from the note's §9 checklist and prose.
 
 #### Wire contract v2
 
@@ -129,8 +132,17 @@ live-only, never logged.
   `nox_index`, `co2_ppm`, `pm4_ugm3` and the new status bits replace `tvoc_ppb`,
   `eco2_ppm` and the AHT21/ENS160/BMV080 columns.
 - **Scan list** refreshes a peripheral's advertised name on every advertisement,
-  not just its RSSI, so a renamed unit updates in place. `peripheral.name` is
-  still only a fallback for when `CBAdvertisementDataLocalNameKey` is absent.
+  not just its RSSI, so a renamed unit updates in place. It reads
+  `CBAdvertisementDataLocalNameKey` **only** — `peripheral.name` is deliberately
+  not consulted, because iOS caches it and can keep showing a unit's *old*
+  nickname for the lifetime of the app install. A peripheral advertising no local
+  name falls back to the neutral product label; the row's identifier suffix
+  disambiguates units.
+- **Both parsers guard on exact length** (`== 52` live, `== 34` history) rather
+  than a minimum, per the handoff note. An over-length payload is reported as a
+  contract violation instead of being silently decoded from its first N bytes.
+- **`0x0E` is range-checked client-side** (350–2000 ppm) so a reference the
+  firmware would reject with an ATT error is never written.
 - **Simulator** synthesises real 52-byte v2 live packets and 34-byte history
   packets through the production parsers, including a warm-up window, PM and
   over-range sentinels, and a fan-speed warning.
@@ -154,15 +166,16 @@ live-only, never logged.
   an empty history until records accumulate at ~1/min.
 
 #### Tests
-`G2-iOSTests` (Swift Testing), **48 tests in 5 suites, all passing**. Payloads are
+`G2-iOSTests` (Swift Testing), **51 tests in 6 suites, all passing**. Payloads are
 hand-authored golden vectors written from the firmware byte tables — not produced
 by the app's own encoders, which would pass even if both sides drifted together.
 
 Covered: a fully valid 52-byte packet (every field, in display units) · all-invalid
 sentinels · PM `0xFFFE` over-range (and that `0xFFFE` is *not* folded away for
 non-PM fields) · warming state (bit 2 + aq_class 0) vs. plain unknown · rejection
-of a 31-byte legacy packet, a legacy `0x02` marker, a stray history marker and an
-unexpected payload version · short and sliced payloads · a 34-byte history packet
+of a 31-byte legacy packet, a legacy `0x02` marker, a stray history marker, an
+unexpected payload version and an over-length payload · short and sliced payloads ·
+the `0x0E` reference range and the three new opcodes · a 34-byte history packet
 and its end-of-sync sentinel · rejection of 31-byte v1 history · 12-byte settings
 encode/decode round-trip with brightness floor/ceiling clamping · threshold
 monotonicity and 1–500 range · fan-mode wire mapping · device-name byte-length

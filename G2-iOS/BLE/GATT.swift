@@ -5,10 +5,11 @@
 //  Authoritative Smart Air System (G2) BLE GATT contract — **contract v2 (SEN66)**.
 //
 //  ⚠️ SOURCE OF TRUTH — these values mirror firmware branch `SEN66` of
-//  earp123/G2-Air-Quality-Monitor, `docs/sen66-migration.md` §6 (verified
-//  byte-for-byte 2026-09-14). Do NOT change, guess, or "improve" any UUID,
-//  opcode, byte offset, scaling factor, or sentinel. If a value is missing
-//  here, ask before assuming.
+//  earp123/G2-Air-Quality-Monitor: `docs/sen66-migration.md` §6 and the iOS
+//  handoff note `docs/gatt-v2-ios-notes.md` (firmware commit 18746cd), verified
+//  byte-for-byte 2026-09-14. Where the two disagree, the handoff note wins.
+//  Do NOT change, guess, or "improve" any UUID, opcode, byte offset, scaling
+//  factor, or sentinel. If a value is missing here, ask before assuming.
 //
 //  Contract v2 is NOT compatible with SPS30-era firmware: the live packet
 //  (31 → 52 bytes), the history packet (31 → 34 bytes), the log record
@@ -119,7 +120,7 @@ nonisolated enum GATT {
         case fanCustom    = 0x0A  // Custom mode — VOC-index setpoints from Settings (§1.3).
         case setTime      = 0x0B  // SET_TIME [sec min hr wday mday mon yr2k] — raw decimal, not BCD.
         case syncRecent   = 0x0C  // SYNC_RECENT [count: u32 LE] — stream newest N records (5-byte write).
-        case fanCleaning  = 0x0D  // SEN66 fan cleaning, no params (~10 s, PM pauses).
+        case fanCleaning  = 0x0D  // SEN66 fan cleaning, no params (~12 s, PM pauses, re-arms warming).
         case co2Recal     = 0x0E  // Forced CO2 recalibration [ppm_ref: u16 LE].
         case clearErrors  = 0x0F  // Read-and-clear the SEN66 device status register.
     }
@@ -128,8 +129,11 @@ nonisolated enum GATT {
     static let attErrorUnknownOpcode: UInt8 = 0x0E
 
     /// Reference concentration the app sends with `0x0E` — clean outdoor air.
-    /// Firmware rejects anything outside 350…2000 ppm (firmware §6.7).
     static let co2RecalibrationReferencePpm: UInt16 = 400
+
+    /// Accepted range for the `0x0E` reference concentration. Firmware rejects
+    /// anything outside it with an ATT error (firmware §6.7 / notes §4).
+    static let co2RecalibrationRange: ClosedRange<UInt16> = 350...2000
 
     // MARK: - Sensor payload layout (§1.1) — 52 bytes
 

@@ -164,6 +164,29 @@ struct DeviceSettingsTests {
     }
 }
 
+@Suite("Commands — opcode parameters")
+struct CommandTests {
+
+    @Test("The CO₂ recalibration reference the app sends is inside the accepted range")
+    func co2ReferenceInRange() {
+        #expect(GATT.co2RecalibrationRange == 350...2000)
+        #expect(GATT.co2RecalibrationRange.contains(GATT.co2RecalibrationReferencePpm))
+        #expect(GATT.co2RecalibrationReferencePpm == 400)
+        // Boundaries firmware accepts, and the first value outside each end.
+        #expect(GATT.co2RecalibrationRange.contains(350))
+        #expect(GATT.co2RecalibrationRange.contains(2000))
+        #expect(!GATT.co2RecalibrationRange.contains(349))
+        #expect(!GATT.co2RecalibrationRange.contains(2001))
+    }
+
+    @Test("New v2 opcodes carry their documented values")
+    func newOpcodes() {
+        #expect(GATT.Command.fanCleaning.rawValue == 0x0D)
+        #expect(GATT.Command.co2Recal.rawValue == 0x0E)
+        #expect(GATT.Command.clearErrors.rawValue == 0x0F)
+    }
+}
+
 @Suite("Device Name — 20-byte UTF-8 rule")
 struct DeviceNameTests {
 
