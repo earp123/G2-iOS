@@ -43,9 +43,56 @@ final class BluetoothManager: NSObject {
     /// Set when a malformed/short packet arrives — non-fatal (§7).
     private(set) var lastParseError: String?
 
-    private(set) var thresholds: TVOCThresholds?     // READ from the Settings characteristic
+    /// READ from the Settings characteristic — the full 12-byte payload (§1.3).
+    private(set) var settings: DeviceSettings?
+    /// READ from the Device Name characteristic; the effective name, which is the
+    /// saved nickname or the firmware default (§1.4).
+    private(set) var deviceName: String?
+    /// READ once after discovery from the Device Info characteristic (§1.5).
+    private(set) var deviceInfo: DeviceInfo?
     private(set) var liveRSSI: Int?
     private(set) var mtu: Int?
+
+    /// Convenience accessor for the VOC-index thresholds inside `settings`.
+    var thresholds: VOCThresholds? { settings?.thresholds }
+
+    /// Set when Device Info reports a contract or log-record version this build
+    /// does not implement. Live packets are then refused rather than decoded —
+    /// the firmware handoff note's "cheapest guard against a v1 device meeting a
+    /// v2 app" (notes §7 / §9.3).
+    ///
+    /// An all-zero Device Info means the unit booted with no SEN66 attached
+    /// (notes §7), not a version mismatch, so it does not trip this guard — such
+    /// a unit still speaks v2, it just has nothing to report. That reading is the
+    /// only one consistent with both statements in the note.
+    private(set) var unsupportedContract: DeviceInfo?
+
+    /// True when the device says no SEN66 is attached (status bit 0 clear). Every
+    /// measurement is at its sentinel; the UI says "disconnected", not zeros
+    /// (notes §2).
+    var sensorDisconnected: Bool {
+        guard let reading = latestReading else { return false }
+        return !reading.status.sen66Present
+    }
+
+    /// True while the SEN66 is warming (status bit 2). Fan cleaning is refused by
+    /// firmware during this window, so the button is disabled (notes §4).
+    var sensorIsWarming: Bool { latestReading?.status.sen66Warming ?? false }
+
+    /// The live packet is 52 bytes, so ATT MTU must be at least 55 (notes §8).
+    static let minimumUsableMTU = 55
+    var mtuIsTooSmall: Bool {
+        guard let mtu else { return false }
+        return mtu < Self.minimumUsableMTU
+    }
+
+    /// True when the device reports Manual mode at 0 %. Firmware restores that
+    /// state exactly as saved, so the fan stays off across the next ignition
+    /// cycle — the app surfaces it as a persistent warning and a tab badge (§5).
+    var showsManualOffWarning: Bool {
+        guard let reading = latestReading else { return false }
+        return reading.fanMode == .manual && reading.fanSpeedPct == 0
+    }
 
     /// Transient command result for a toast; the view clears it after showing.
     var commandFeedback: CommandFeedback?
@@ -61,6 +108,8 @@ final class BluetoothManager: NSObject {
     @ObservationIgnored private var sensorChar: CBCharacteristic?
     @ObservationIgnored private var commandChar: CBCharacteristic?
     @ObservationIgnored private var settingsChar: CBCharacteristic?
+    @ObservationIgnored private var deviceNameChar: CBCharacteristic?
+    @ObservationIgnored private var deviceInfoChar: CBCharacteristic?
 
     @ObservationIgnored private var scanWatchdog: Task<Void, Never>?
     @ObservationIgnored private var connectWatchdog: Task<Void, Never>?
@@ -86,7 +135,12 @@ final class BluetoothManager: NSObject {
     @ObservationIgnored private var simLoop: Task<Void, Never>?
     @ObservationIgnored private var simSequence: UInt16 = 0
     @ObservationIgnored private var simFanSpeed: Int = 25
-    @ObservationIgnored private var simThresholds: TVOCThresholds = .defaults
+    @ObservationIgnored private var simSettings: DeviceSettings = .defaults
+    @ObservationIgnored private var simDeviceName: String = GATT.advertisedName
+    /// Synthetic SEN66 device status register (bytes 36–39), cleared by the
+    /// maintenance commands so their effect is visible in the Simulator.
+    @ObservationIgnored private var simSen66Status: UInt32 = 0
+    @ObservationIgnored private var simHistoryTask: Task<Void, Never>?
     #else
     let isSimulated = false
     #endif
@@ -204,12 +258,17 @@ final class BluetoothManager: NSObject {
         sensorChar = nil
         commandChar = nil
         settingsChar = nil
+        deviceNameChar = nil
+        deviceInfoChar = nil
 
         phase = .disconnected
         connectedDevice = nil
         latestReading = nil
         lastParseError = nil
-        thresholds = nil
+        settings = nil
+        deviceName = nil
+        deviceInfo = nil
+        unsupportedContract = nil
         liveRSSI = nil
         mtu = nil
         lastDisconnectReason = reason
@@ -248,10 +307,41 @@ final class BluetoothManager: NSObject {
         #endif
     }
 
-    func setFanAuto()      { sendCommand(.fanAuto) }
-    func setFanTVOCAuto()  { sendCommand(.fanTVOCAuto) }
+    func setFanAuto()   { sendCommand(.fanAuto) }
+    func setFanCustom() { sendCommand(.fanCustom) }      // 0x0A — VOC-index setpoints (§1.3)
     func setFanPreset(_ preset: FanPreset) { sendCommand(preset.command) }
-    func refreshNow()      { sendCommand(.getStatus) }   // 0x09 (§2.4 / §6.2)
+    func refreshNow()   { sendCommand(.getStatus) }      // 0x09 (§1.6 / §5)
+
+    // MARK: - SEN66 maintenance commands (§1.6)
+
+    /// 0x0D — runs the SEN66's fan-cleaning cycle (~10 s; PM readings pause).
+    func sendFanCleaning() {
+        sendCommand(.fanCleaning)
+        commandFeedback = .succeeded("Fan cleaning started — PM readings pause for about 10 seconds.")
+    }
+
+    /// 0x0F — read-and-clear the SEN66 device status register, dropping any
+    /// latched (sticky) error flags.
+    func sendClearSensorErrors() {
+        sendCommand(.clearErrors)
+        commandFeedback = .succeeded("Sensor errors cleared.")
+    }
+
+    /// 0x0E — forced CO₂ recalibration against a reference concentration. The
+    /// app sends 400 ppm (clean outdoor air); firmware rejects anything outside
+    /// 350–2000 ppm. The sensor must have been outdoors for at least 3 minutes.
+    func sendCO2Recalibration(ppm: UInt16 = GATT.co2RecalibrationReferencePpm) {
+        #if targetEnvironment(simulator)
+        commandFeedback = .succeeded("CO₂ recalibrated to \(ppm) ppm.")
+        #else
+        writeToCommand(Data([
+            GATT.Command.co2Recal.rawValue,
+            UInt8(ppm & 0x00FF),
+            UInt8((ppm >> 8) & 0x00FF),
+        ]))
+        commandFeedback = .succeeded("CO₂ recalibration sent (\(ppm) ppm reference).")
+        #endif
+    }
 
     /// Exact fan speed 0–100% via the manual slider — 2-byte write (§2.4 / §6.2).
     func setFanManual(percent: Int) {
@@ -282,37 +372,145 @@ final class BluetoothManager: NSObject {
         #endif
     }
 
-    // MARK: - Settings (§2.5 / §6.4)
+    // MARK: - Settings, name and info (§1.3 / §1.4 / §1.5)
 
     func readSettings() {
         #if targetEnvironment(simulator)
-        thresholds = simThresholds
+        settings = simSettings
         #else
         guard phase == .connected, let p = connectedPeripheral, let c = settingsChar else { return }
         p.readValue(for: c)
         #endif
     }
 
-    /// Validates strict-increasing thresholds client-side, then writes 8 bytes (§2.5).
-    /// Returns false (without writing) if non-monotonic.
+    /// Validates the thresholds client-side, then writes the full 12-byte payload
+    /// (§1.3). Returns false (without writing) if the thresholds are invalid.
     @discardableResult
-    func writeSettings(_ thresholds: TVOCThresholds) -> Bool {
-        guard thresholds.isMonotonic else {
+    func writeSettings(_ newSettings: DeviceSettings) -> Bool {
+        guard newSettings.thresholds.isMonotonic else {
             commandFeedback = .rejected("Thresholds must be strictly increasing (lo < med < hi < max).")
             return false
         }
+        guard newSettings.thresholds.isInRange else {
+            commandFeedback = .rejected(
+                "Thresholds must be between \(GATT.vocIndexMin) and \(GATT.vocIndexMax) on the VOC index scale.")
+            return false
+        }
         #if targetEnvironment(simulator)
-        simThresholds = thresholds
-        self.thresholds = thresholds
+        simSettings = newSettings
+        settings = newSettings
+        simFanSpeed = newSettings.fanMode == .manual ? Int(newSettings.fanManualPct) : simFanSpeed
         return true
         #else
         guard phase == .connected, let p = connectedPeripheral, let c = settingsChar else {
             commandFeedback = .rejected("Not connected")
             return false
         }
-        p.writeValue(thresholds.encoded, for: c, type: .withResponse)
+        p.writeValue(newSettings.encoded, for: c, type: .withResponse)
         startWriteWatchdog()
+        // Optimistic local echo so the editor doesn't snap back before the next
+        // READ; a rejected write surfaces through handleWriteResult.
+        settings = newSettings
         return true
+        #endif
+    }
+
+    /// Writes only the LED brightness, preserving every other settings field (§6).
+    @discardableResult
+    func writeLEDBrightness(_ percent: UInt8) -> Bool {
+        var updated = settings ?? .defaults
+        updated.ledBrightnessPct = DeviceSettings.clampBrightness(percent)
+        return writeSettings(updated)
+    }
+
+    /// Writes only the VOC-index thresholds, preserving every other field (§6).
+    @discardableResult
+    func writeThresholds(_ thresholds: VOCThresholds) -> Bool {
+        var updated = settings ?? .defaults
+        updated.thresholds = thresholds
+        return writeSettings(updated)
+    }
+
+    func readDeviceName() {
+        #if targetEnvironment(simulator)
+        deviceName = simDeviceName
+        #else
+        guard phase == .connected, let p = connectedPeripheral, let c = deviceNameChar else { return }
+        p.readValue(for: c)
+        #endif
+    }
+
+    /// Writes the Device Name characteristic. The device accepts 1–20 **UTF-8
+    /// bytes** with no NUL and no surrounding whitespace, so the same rules are
+    /// enforced here before the write (§1.4).
+    @discardableResult
+    func writeDeviceName(_ name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let encoded = Self.encodedDeviceName(trimmed) else {
+            commandFeedback = .rejected(
+                "Name must be 1–\(GATT.deviceNameMaxBytes) bytes of text (currently \(trimmed.utf8.count)).")
+            return false
+        }
+        #if targetEnvironment(simulator)
+        simDeviceName = trimmed
+        deviceName = trimmed
+        updateConnectedDeviceName(trimmed)
+        commandFeedback = .succeeded("Name saved.")
+        return true
+        #else
+        guard phase == .connected, let p = connectedPeripheral, let c = deviceNameChar else {
+            commandFeedback = .rejected("Not connected")
+            return false
+        }
+        p.writeValue(encoded, for: c, type: .withResponse)
+        startWriteWatchdog()
+        deviceName = trimmed
+        updateConnectedDeviceName(trimmed)
+        commandFeedback = .succeeded("Name saved.")
+        return true
+        #endif
+    }
+
+    /// Validates a candidate name against the wire rules and returns its UTF-8
+    /// encoding, or nil when it would be rejected (§1.4).
+    nonisolated static func encodedDeviceName(_ name: String) -> Data? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains("\0") else { return nil }
+        let bytes = Array(trimmed.utf8)
+        guard bytes.count <= GATT.deviceNameMaxBytes else { return nil }
+        return Data(bytes)
+    }
+
+    /// Keeps the connection chip and the scan entry in step with a renamed unit.
+    private func updateConnectedDeviceName(_ name: String) {
+        connectedDevice?.name = name
+        if let id = connectedDevice?.id, let idx = discoveredDevices.firstIndex(where: { $0.id == id }) {
+            discoveredDevices[idx].name = name
+        }
+    }
+
+    /// Refuses a device whose reported contract or log-record version this build
+    /// does not implement (notes §7). A zeroed Device Info is "no SEN66 at boot",
+    /// not a mismatch, and is allowed through.
+    private func applyContractGuard(_ info: DeviceInfo) {
+        let bootedWithoutSensor = info.contractVersion == 0 && info.logRecordVersion == 0
+        let mismatched = info.contractVersion != GATT.contractVersion
+            || info.logRecordVersion != GATT.historyRecordVersion
+        if bootedWithoutSensor || !mismatched {
+            unsupportedContract = nil
+            return
+        }
+        unsupportedContract = info
+        latestReading = nil          // nothing already on screen stays trustworthy
+        lastParseError = nil
+    }
+
+    func readDeviceInfo() {
+        #if targetEnvironment(simulator)
+        deviceInfo = Self.simDeviceInfo
+        #else
+        guard phase == .connected, let p = connectedPeripheral, let c = deviceInfoChar else { return }
+        p.readValue(for: c)
         #endif
     }
 
@@ -347,7 +545,11 @@ final class BluetoothManager: NSObject {
 
         let device = DiscoveredDevice(id: p.identifier, name: name, rssi: rssi)
         if let idx = discoveredDevices.firstIndex(where: { $0.id == device.id }) {
-            discoveredDevices[idx].rssi = rssi   // update in place (§3/§5)
+            // Update in place. The name is refreshed too, not just the RSSI: a
+            // unit renamed through the Device Name characteristic re-advertises
+            // under its new local name (§2).
+            discoveredDevices[idx].rssi = rssi
+            discoveredDevices[idx].name = name
         } else {
             discoveredDevices.append(device)
         }
@@ -381,10 +583,7 @@ final class BluetoothManager: NSObject {
             teardownConnection(reason: .discoveryFailed("service not found"))
             return
         }
-        p.discoverCharacteristics(
-            [GATT.sensorCharacteristicUUID, GATT.commandCharacteristicUUID, GATT.settingsCharacteristicUUID],
-            for: service
-        )
+        p.discoverCharacteristics(GATT.allCharacteristicUUIDs, for: service)
     }
 
     private func handleCharacteristicsDiscovered(_ box: PeripheralBox, error: String?) {
@@ -396,10 +595,12 @@ final class BluetoothManager: NSObject {
         }
         for c in chars {
             switch GATT.Characteristic(c.uuid) {
-            case .sensor:   sensorChar = c
-            case .command:  commandChar = c
-            case .settings: settingsChar = c
-            case .unknown:  break
+            case .sensor:     sensorChar = c
+            case .command:    commandChar = c
+            case .settings:   settingsChar = c
+            case .deviceName: deviceNameChar = c
+            case .deviceInfo: deviceInfoChar = c
+            case .unknown:    break
             }
         }
         guard let sensor = sensorChar else {
@@ -409,7 +610,14 @@ final class BluetoothManager: NSObject {
         // Subscribe to the CCCD; the `.connected` transition happens once notifying (§3).
         p.setNotifyValue(true, for: sensor)
         if sensor.properties.contains(.read) { p.readValue(for: sensor) }
-        readSettings()
+
+        // Settings, Device Name and Device Info are read once after discovery (§2).
+        // The reads are issued directly rather than through the public accessors,
+        // which gate on `phase == .connected` — that transition happens later, on
+        // the CCCD callback.
+        if let c = settingsChar   { p.readValue(for: c) }
+        if let c = deviceNameChar { p.readValue(for: c) }
+        if let c = deviceInfoChar { p.readValue(for: c) }
     }
 
     private func handleNotificationStateChanged(_ kind: GATT.Characteristic, isNotifying: Bool, error: String?) {
@@ -429,18 +637,31 @@ final class BluetoothManager: NSObject {
                 handleHistoryPacket(data)
                 return
             }
+            // A device on another contract version is refused outright rather
+            // than decoded into plausible-looking numbers (notes §7 / §9.3).
+            if unsupportedContract != nil { return }
             switch SensorParser.parse(data) {
             case .success(let reading):
                 latestReading = reading
                 lastParseError = nil
             case .failure(let err):
-                if case let .malformedPacket(length) = err {
-                    lastParseError = "Malformed packet (\(length) bytes)"  // non-fatal (§7)
-                }
+                lastParseError = err.message   // non-fatal (§7)
             }
         case .settings:
-            guard let data, let parsed = TVOCThresholds(data: data) else { return }
-            thresholds = parsed
+            guard let data, let parsed = DeviceSettings(data: data) else { return }
+            settings = parsed
+        case .deviceName:
+            guard let data else { return }
+            // 1–20 bytes UTF-8, no NUL, trimmed (§1.4).
+            let decoded = String(decoding: data.prefix { $0 != 0 }, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !decoded.isEmpty else { return }
+            deviceName = decoded
+            updateConnectedDeviceName(decoded)
+        case .deviceInfo:
+            guard let data, let parsed = DeviceInfo(data: data) else { return }
+            deviceInfo = parsed
+            applyContractGuard(parsed)
         default:
             break
         }
@@ -463,11 +684,16 @@ final class BluetoothManager: NSObject {
     private func handleWriteResult(_ kind: GATT.Characteristic, error: String?, attCode: Int?) {
         writeWatchdog?.cancel()
         guard let error else { return }   // success
-        if attCode == Int(GATT.attErrorUnknownOpcode) {
+        switch kind {
+        case _ where attCode == Int(GATT.attErrorUnknownOpcode):
             commandFeedback = .rejected("Command rejected by device (unknown opcode 0x0E).")
-        } else if kind == .settings {
+        case .settings:
             commandFeedback = .rejected("Settings rejected by device: \(error)")
-        } else {
+            readSettings()      // re-read so the editor reflects what the device kept
+        case .deviceName:
+            commandFeedback = .rejected("Name rejected by device: \(error)")
+            readDeviceName()
+        default:
             commandFeedback = .rejected("Command rejected: \(error)")
         }
     }
@@ -499,6 +725,9 @@ extension BluetoothManager: HistorySyncTransport {
         return connectedDevice?.shortIdentifier
     }
 
+    /// Log-record version the device reports in Device Info byte 35 (§1.5).
+    var deviceLogRecordVersion: UInt8? { deviceInfo?.logRecordVersion }
+
     /// Sends the sync command (0x01 full dump / 0x0C recent-N), then yields one
     /// HistoryStreamEvent per received history packet. Finishes on the end-of-sync
     /// sentinel, on link loss, or if no packet arrives within
@@ -507,6 +736,11 @@ extension BluetoothManager: HistorySyncTransport {
         let (stream, continuation) = AsyncStream<HistoryStreamEvent>.makeStream()
         historyStreamContinuation?.finish()   // cancel any in-flight sync
         historyStreamContinuation = continuation
+        #if targetEnvironment(simulator)
+        // No radio: stream synthetic 34-byte packets through the real parser (§2).
+        startSimulatedHistoryStream(mode: mode)
+        return stream
+        #else
         switch mode {
         case .full:
             writeToCommand(Data([GATT.Command.syncHistory.rawValue]))
@@ -521,6 +755,7 @@ extension BluetoothManager: HistorySyncTransport {
         }
         startHistoryWatchdog()
         return stream
+        #endif
     }
 
     /// A single poller that ends the stream once no history packet has arrived for
@@ -641,9 +876,10 @@ extension BluetoothManager: CBPeripheralDelegate {
 // MARK: - Simulation (Simulator only)
 //
 // Synthetic transport used because the iOS Simulator has no Bluetooth radio.
-// Readings are built into real 31-byte packets and decoded by the production
-// SensorParser, so this exercises the same parsing path as live hardware.
-// Compiled only for the Simulator; never present in device builds.
+// Readings are built into real 52-byte contract-v2 packets and history into real
+// 34-byte packets, then decoded by the production SensorParser and
+// HistoryPacketParser — so this exercises the same wire path as live hardware
+// (§2). Compiled only for the Simulator; never present in device builds.
 
 #if targetEnvironment(simulator)
 extension BluetoothManager {
@@ -654,10 +890,24 @@ extension BluetoothManager {
         UUID(uuidString: "22222222-2222-2222-2222-2222222222CD")!,
     ]
 
+    /// Device Info a synthetic unit reports — a plausible SEN66 serial and the
+    /// contract/record versions this build implements (§1.5).
+    static let simDeviceInfo = DeviceInfo(
+        serial: "SEN66-0A1B2C3D4E5F",
+        firmwareMajor: 1,
+        firmwareMinor: 4,
+        contractVersion: GATT.contractVersion,
+        logRecordVersion: GATT.historyRecordVersion
+    )
+
+    /// Ticks the synthetic unit spends warming up after connecting, so the
+    /// "Warming up" treatment (status bit 2, aq_class 0) is exercisable (§2).
+    private static let simWarmupTicks: UInt16 = 4
+
     /// Test hook: skip the scan and land directly in a connected session.
     func debugAutoConnect() {
         let id = Self.simIDs[0]
-        discoveredDevices = [DiscoveredDevice(id: id, name: GATT.advertisedName, rssi: -47)]
+        discoveredDevices = [DiscoveredDevice(id: id, name: simDeviceName, rssi: -47)]
         connectSimulated(to: id)
     }
 
@@ -668,8 +918,8 @@ extension BluetoothManager {
             try? await Task.sleep(for: .milliseconds(500))
             guard let self, self.scanState == .scanning else { return }
             self.discoveredDevices = [
-                DiscoveredDevice(id: Self.simIDs[0], name: "\(GATT.advertisedName)", rssi: -47),
-                DiscoveredDevice(id: Self.simIDs[1], name: "\(GATT.advertisedName)", rssi: -68),
+                DiscoveredDevice(id: Self.simIDs[0], name: self.simDeviceName, rssi: -47),
+                DiscoveredDevice(id: Self.simIDs[1], name: GATT.advertisedName, rssi: -68),
             ]
             // Jitter RSSI in place so the live-update behaviour is visible (§3/§5).
             while !Task.isCancelled, self.scanState == .scanning {
@@ -687,7 +937,7 @@ extension BluetoothManager {
         stopScan()
         clearDisconnectReason()
         connectedDevice = discoveredDevices.first { $0.id == id }
-            ?? DiscoveredDevice(id: id, name: GATT.advertisedName, rssi: -50)
+            ?? DiscoveredDevice(id: id, name: simDeviceName, rssi: -50)
         phase = .connecting
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(700))
@@ -696,7 +946,10 @@ extension BluetoothManager {
             try? await Task.sleep(for: .milliseconds(400))
             guard self.phase == .discovering else { return }
             self.phase = .connected
-            self.thresholds = self.simThresholds
+            self.simSequence = 0
+            self.settings = self.simSettings
+            self.deviceName = self.simDeviceName
+            self.deviceInfo = Self.simDeviceInfo
             self.liveRSSI = self.connectedDevice?.rssi ?? -50
             self.mtu = 185
             self.startSimulatedReadings()
@@ -716,78 +969,231 @@ extension BluetoothManager {
 
     private func simulateCommand(_ command: GATT.Command, parameter: UInt8?) {
         switch command {
-        case .fanOff:  simFanSpeed = 0
-        case .fanLow:  simFanSpeed = 25
-        case .fanMed:  simFanSpeed = 50
-        case .fanHigh: simFanSpeed = 75
-        case .fanMax:  simFanSpeed = 100
-        case .fanManual: simFanSpeed = Int(parameter ?? 0)
-        case .fanAuto, .fanTVOCAuto: simFanSpeed = 50   // pretend the controller settled here
-        case .getStatus: break                          // forces an immediate emit below
-        case .syncHistory, .syncRecent: return           // history is handled by the repository
-        case .setTime: return                           // setDeviceTime() short-circuits before sendCommand
+        case .fanOff:  simFanSpeed = 0;   simSettings.fanMode = .manual; simSettings.fanManualPct = 0
+        case .fanLow:  simFanSpeed = 25;  simSettings.fanMode = .manual; simSettings.fanManualPct = 25
+        case .fanMed:  simFanSpeed = 50;  simSettings.fanMode = .manual; simSettings.fanManualPct = 50
+        case .fanHigh: simFanSpeed = 75;  simSettings.fanMode = .manual; simSettings.fanManualPct = 75
+        case .fanMax:  simFanSpeed = 100; simSettings.fanMode = .manual; simSettings.fanManualPct = 100
+        case .fanManual:
+            simFanSpeed = Int(parameter ?? 0)
+            simSettings.fanMode = .manual
+            simSettings.fanManualPct = UInt8(simFanSpeed)
+        case .fanAuto:
+            simSettings.fanMode = .auto
+            simFanSpeed = 50        // pretend the controller settled here
+        case .fanCustom:
+            simSettings.fanMode = .custom
+            simFanSpeed = 50
+        case .getStatus: break      // forces an immediate emit below
+        case .fanCleaning, .clearErrors, .co2Recal:
+            simSen66Status = 0      // maintenance clears the synthetic fault register
+        case .syncHistory, .syncRecent: return  // handled by the simulated history stream
+        case .setTime: return                   // setDeviceTime() short-circuits before sendCommand
         }
+        settings = simSettings
         liveRSSI = (connectedDevice?.rssi ?? -50) + Int.random(in: -2...2)
         emitSimulatedReading()
     }
 
-    /// Builds a realistic 31-byte packet and feeds it through the production parser.
+    /// Builds a realistic 52-byte v2 packet and feeds it through the production
+    /// parser, on the same path a live notification takes.
     private func emitSimulatedReading() {
+        let warming = simSequence < Self.simWarmupTicks
+
         let t = Date()
         let hour = Double(Calendar.current.component(.hour, from: t))
         let dayPhase = sin((hour - 9.0) / 24.0 * 2 * .pi)
         let temp = 22.0 + dayPhase * 3 + Double.random(in: -0.3...0.3)
-        let hum = 46.0 - dayPhase * 6 + Double.random(in: -1...1)
-        let tvoc = max(0, Int((120 + dayPhase * 40 + Double.random(in: -25...60)).rounded()))
-        let eco2 = 420 + Int(Double(tvoc) * 0.5) + Int.random(in: -20...40)
-        let pm1 = Int.random(in: 4...12), pm25 = Int.random(in: 8...20), pm10 = Int.random(in: 12...30)
-        let aqi: UInt8 = tvoc < 150 ? 2 : tvoc < 350 ? 3 : tvoc < 650 ? 4 : 5
+        let humidity = 46.0 - dayPhase * 6 + Double.random(in: -1...1)
 
-        // Occasionally inject a sentinel so the "—" handling is visible (§6.1).
-        let injectSentinel = Double.random(in: 0...1) < 0.06
+        var vocIndex = 95.0 + dayPhase * 25 + Double.random(in: -12...30)
+        if Double.random(in: 0...1) < 0.05 { vocIndex += Double.random(in: 120...300) }
+        vocIndex = min(500, max(1, vocIndex))
+        let noxIndex = min(500, max(1, 6.0 + dayPhase * 3 + Double.random(in: -3...6)))
+        let co2 = 430 + Int((vocIndex - 95) * 1.6) + Int.random(in: -20...40)
+
+        let pm1  = 4.0 + Double.random(in: 0...6)
+        let pm25 = pm1 + Double.random(in: 2...8)
+        let pm4  = pm25 + Double.random(in: 0.5...3)
+        let pm10 = pm4 + Double.random(in: 0.5...5)
+
+        // Occasionally inject a sentinel so the "—" handling is visible (§4).
+        let injectSentinel = !warming && Double.random(in: 0...1) < 0.06
+        // Occasionally raise the SEN66 fan-speed warning so its yellow row shows.
+        if !warming, Double.random(in: 0...1) < 0.03 { simSen66Status = 1 << 21 }
+
+        var status: UInt8 = 0x01            // bit0 SEN66 present
+        status |= 0x02                      // bit1 fresh reading this tick
+        if warming { status |= 0x04 }       // bit2 SEN66 warming
+        status |= 0x08                      // bit3 TWAI online
+        if simSen66Status & 0x00000AD0 != 0 { status |= 0x10 }   // bit4 sticky error
+        status |= 0x40                      // bit6 ionizer powered
+        if Double.random(in: 0...1) < 0.03 { status |= 0x20 }    // bit5 ionizer fault
+
+        let aqClass: UInt8 = warming ? 0
+            : vocIndex <= 100 ? 1 : vocIndex <= 150 ? 2 : vocIndex <= 250 ? 3 : vocIndex <= 350 ? 4 : 5
 
         let packet = Self.makeSimPacket(
+            sequence: simSequence,
             tempC: injectSentinel ? nil : temp,
-            humidity: hum,
-            tvoc: tvoc,
-            eco2: eco2,
-            pm1:  injectSentinel ? nil : pm1,   // nil → 0xFFFF, exercises PM "—" path
-            pm25: injectSentinel ? nil : pm25,
-            pm10: injectSentinel ? nil : pm10,
-            aqi: injectSentinel ? 0 : aqi,
+            humidity: humidity,
+            vocIndex: warming ? nil : vocIndex,
+            noxIndex: warming ? nil : noxIndex,
+            co2: warming ? nil : co2,
+            pm1:  warming || injectSentinel ? nil : pm1,   // nil → 0xFFFF, exercises the "—" path
+            pm25: warming || injectSentinel ? nil : pm25,
+            pm4:  warming || injectSentinel ? nil : pm4,
+            pm10: warming || injectSentinel ? nil : pm10,
+            aqClass: aqClass,
             fan: simFanSpeed,
-            status: 0x3F,                 // all sensors and ionizer healthy (bits 0–5)
-            sequence: simSequence
+            fanMode: simSettings.fanMode ?? .auto,
+            status: status,
+            sen66Status: simSen66Status
         )
         simSequence = simSequence &+ 1
         handleValueUpdate(.sensor, data: packet, error: nil)   // same path as live notifications
     }
 
-    /// Encodes values into the authoritative 31-byte layout (§2.3), including the
-    /// embedded header bytes 0–7 that the parser must skip.
+    /// Encodes values into the authoritative 52-byte v2 layout (§1.1).
     private static func makeSimPacket(
-        tempC: Double?, humidity: Double?, tvoc: Int?, eco2: Int?,
-        pm1: Int?, pm25: Int?, pm10: Int?, aqi: UInt8, fan: Int, status: UInt8, sequence: UInt16
+        sequence: UInt16,
+        tempC: Double?, humidity: Double?, vocIndex: Double?, noxIndex: Double?, co2: Int?,
+        pm1: Double?, pm25: Double?, pm4: Double?, pm10: Double?,
+        aqClass: UInt8, fan: Int, fanMode: FanMode, status: UInt8, sen66Status: UInt32
     ) -> Data {
         var b = [UInt8](repeating: 0, count: GATT.sensorPayloadLength)
-        b.replaceSubrange(0..<3, with: [0x02, 0x01, 0x06])               // AD flags
-        b.replaceSubrange(3..<8, with: [0x1A, 0xFF, 0x8E, 0x8E, 0x01])   // mfr-specific
-        func putU16(_ v: UInt16, _ i: Int) { b[i] = UInt8(v & 0xFF); b[i + 1] = UInt8(v >> 8) }
+        let o = GATT.SensorOffset.self
 
-        let tRaw = tempC.map { Int16(max(-320, min(320, $0)) * 100) } ?? Int16(bitPattern: 0x8000)
-        putU16(UInt16(bitPattern: tRaw), 8)
-        putU16(humidity.map { UInt16(max(0, min(655, $0)) * 100) } ?? 0xFFFF, 10)
-        putU16(tvoc.map { UInt16(min(65534, $0)) } ?? 0xFFFF, 12)
-        putU16(eco2.map { UInt16(min(65534, $0)) } ?? 0xFFFF, 14)
-        // Cap valid PM at 65533; 0xFFFE (over-range) and 0xFFFF (no-reading) are
-        // reserved sentinels. nil encodes as no-reading.
-        putU16(pm1.map  { UInt16(min(65533, $0)) } ?? GATT.pmSentinelNoReading, 16)
-        putU16(pm25.map { UInt16(min(65533, $0)) } ?? GATT.pmSentinelNoReading, 18)
-        putU16(pm10.map { UInt16(min(65533, $0)) } ?? GATT.pmSentinelNoReading, 20)
-        b[22] = aqi
-        b[23] = UInt8(max(0, min(100, fan)))
-        b[24] = status
-        putU16(sequence, 25)
+        func putU16(_ v: UInt16, _ i: Int) { b[i] = UInt8(v & 0xFF); b[i + 1] = UInt8(v >> 8) }
+        func putI16(_ v: Int16, _ i: Int)  { putU16(UInt16(bitPattern: v), i) }
+        func putU32(_ v: UInt32, _ i: Int) {
+            b[i]     = UInt8(v & 0xFF)
+            b[i + 1] = UInt8((v >> 8) & 0xFF)
+            b[i + 2] = UInt8((v >> 16) & 0xFF)
+            b[i + 3] = UInt8((v >> 24) & 0xFF)
+        }
+        /// Encodes a ×10 display value, or the invalid sentinel for nil. Valid
+        /// values cap at 65533 so 0xFFFE/0xFFFF stay reserved.
+        func putX10(_ v: Double?, _ i: Int) {
+            putU16(v.map { UInt16(min(65533, max(0, ($0 * 10).rounded()))) } ?? GATT.u16Sentinel, i)
+        }
+
+        b[o.marker] = GATT.livePacketMarker
+        b[o.payloadVersion] = GATT.livePayloadVersion
+        putU16(sequence, o.sequence)
+        putI16(tempC.map { Int16((max(-320, min(320, $0)) * 100).rounded()) } ?? GATT.i16Sentinel, o.temperature)
+        putU16(humidity.map { UInt16(max(0, min(655, $0)) * 100) } ?? GATT.u16Sentinel, o.humidity)
+        putX10(vocIndex, o.vocIndex)
+        putX10(noxIndex, o.noxIndex)
+        putU16(co2.map { UInt16(min(65533, max(0, $0))) } ?? GATT.u16Sentinel, o.co2)
+        putX10(pm1,  o.pm1)
+        putX10(pm25, o.pm25)
+        putX10(pm4,  o.pm4)
+        putX10(pm10, o.pm10)
+        // Number concentrations track PM with plausible ordering.
+        putX10(pm1.map  { $0 * 1.6 }, o.nc05)
+        putX10(pm1.map  { $0 * 1.1 }, o.nc1)
+        putX10(pm25.map { $0 * 0.6 }, o.nc25)
+        putX10(pm4.map  { $0 * 0.4 }, o.nc4)
+        putX10(pm10.map { $0 * 0.3 }, o.nc10)
+        b[o.aqClass]    = aqClass
+        b[o.fanPercent] = UInt8(max(0, min(100, fan)))
+        b[o.fanMode]    = fanMode.wire
+        b[o.status]     = status
+        putU32(sen66Status, o.sen66Status)
+        putU16(vocIndex.map { UInt16(min(65533, $0 * 40)) } ?? GATT.u16Sentinel, o.rawVOCTicks)
+        putU16(noxIndex.map { UInt16(min(65533, $0 * 35)) } ?? GATT.u16Sentinel, o.rawNOxTicks)
+        putU16(co2.map { UInt16(min(65533, max(0, $0 + Int.random(in: -8...8)))) } ?? GATT.u16Sentinel, o.rawCO2)
+        putI16(humidity.map { Int16(($0 * 100).rounded()) } ?? GATT.i16Sentinel, o.rawHumidity)
+        putI16(tempC.map { Int16(((($0) + 1.2) * 200).rounded()) } ?? GATT.i16Sentinel, o.rawTemperature)
+        b[o.deviceState] = DeviceState.enabled.rawValue
+        b[o.reserved]    = 0
+        return Data(b)
+    }
+
+    // MARK: - Simulated history stream (§2)
+
+    /// Streams synthetic 34-byte history packets through `HistoryPacketParser`,
+    /// finishing with the all-zero sentinel, so the BLE history path is
+    /// exercisable without hardware.
+    func startSimulatedHistoryStream(mode: HistorySyncMode) {
+        let count: Int
+        switch mode {
+        case .full:              count = 720          // ~12 h at 1/min
+        case .recent(let n):     count = Int(min(n, 2_000))
+        }
+        simHistoryTask?.cancel()
+        simHistoryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let now = Date()
+            for i in 0..<count {
+                if Task.isCancelled || self.historyStreamContinuation == nil { return }
+                let timestamp = now.addingTimeInterval(-Double(count - i) * 60)
+                self.handleHistoryPacket(Self.makeSimHistoryPacket(
+                    index: i, total: count, timestamp: timestamp, sequence: UInt16(truncatingIfNeeded: i)))
+                if i % 120 == 119 { try? await Task.sleep(for: .milliseconds(8)) }  // yield to the UI
+            }
+            if Task.isCancelled || self.historyStreamContinuation == nil { return }
+            self.handleHistoryPacket(Self.makeSimHistorySentinel(total: count))
+        }
+    }
+
+    /// Encodes one 34-byte history packet carrying a 26-byte log record v2 (§1.2).
+    private static func makeSimHistoryPacket(
+        index: Int, total: Int, timestamp: Date, sequence: UInt16
+    ) -> Data {
+        var b = [UInt8](repeating: 0, count: GATT.historyPacketLength)
+        func putU16(_ v: UInt16, _ i: Int) { b[i] = UInt8(v & 0xFF); b[i + 1] = UInt8(v >> 8) }
+        func putU24(_ v: UInt32, _ i: Int) {
+            b[i] = UInt8(v & 0xFF); b[i + 1] = UInt8((v >> 8) & 0xFF); b[i + 2] = UInt8((v >> 16) & 0xFF)
+        }
+        func putU32(_ v: UInt32, _ i: Int) {
+            putU24(v, i); b[i + 3] = UInt8((v >> 24) & 0xFF)
+        }
+
+        b[0] = GATT.historyPacketMarker
+        b[1] = GATT.historyHeaderMarker
+        putU24(UInt32(total), GATT.historyTotalCountOffset)
+        putU24(UInt32(index), GATT.historyRecordIndexOffset)
+
+        let r = GATT.historyRecordOffset
+        let f = GATT.HistoryRecordOffset.self
+        let phase = sin(Double(index) / 90.0)
+        let vocIndex = min(500.0, max(1.0, 95 + phase * 30 + Double.random(in: -8...8)))
+        let noxIndex = min(500.0, max(1.0, 6 + phase * 3 + Double.random(in: -2...4)))
+        let co2 = 430 + Int((vocIndex - 95) * 1.6)
+        let pm25 = 9 + phase * 5 + Double.random(in: -2...2)
+
+        func putX10(_ v: Double, _ i: Int) {
+            putU16(UInt16(min(65533, max(0, (v * 10).rounded()))), r + i)
+        }
+
+        putU32(UInt32(timestamp.timeIntervalSince1970), r + f.timestamp)
+        putU16(UInt16(bitPattern: Int16(((22 + phase * 3) * 100).rounded())), r + f.temperature)
+        putU16(UInt16((46 - phase * 6) * 100), r + f.humidity)
+        putX10(vocIndex, f.vocIndex)
+        putX10(noxIndex, f.noxIndex)
+        putU16(UInt16(co2), r + f.co2)
+        putX10(max(0, pm25 - 4), f.pm1)
+        putX10(max(0, pm25), f.pm25)
+        putX10(max(0, pm25 + 2), f.pm4)
+        putX10(max(0, pm25 + 5), f.pm10)
+        b[r + f.aqClass] = vocIndex <= 100 ? 1 : vocIndex <= 150 ? 2 : vocIndex <= 250 ? 3 : 4
+        b[r + f.status]  = 0x4B          // present · fresh · TWAI online · ionizer on
+        putU16(sequence, r + f.sequence)
+        return Data(b)
+    }
+
+    /// The end-of-sync sentinel: framing intact, all 26 record bytes zero (§1.2).
+    private static func makeSimHistorySentinel(total: Int) -> Data {
+        var b = [UInt8](repeating: 0, count: GATT.historyPacketLength)
+        b[0] = GATT.historyPacketMarker
+        b[1] = GATT.historyHeaderMarker
+        func putU24(_ v: UInt32, _ i: Int) {
+            b[i] = UInt8(v & 0xFF); b[i + 1] = UInt8((v >> 8) & 0xFF); b[i + 2] = UInt8((v >> 16) & 0xFF)
+        }
+        putU24(UInt32(total), GATT.historyTotalCountOffset)
+        putU24(UInt32(total), GATT.historyRecordIndexOffset)
         return Data(b)
     }
 }

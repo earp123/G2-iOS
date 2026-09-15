@@ -129,7 +129,10 @@ struct HistoryView: View {
             ) {
                 ForEach(HistoryMetric.allCases) { Text($0.title).tag($0) }
             }
-            .pickerStyle(.segmented)
+            // Eight metrics no longer fit a segmented control (§9.2).
+            .pickerStyle(.menu)
+            .tint(Theme.accent)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

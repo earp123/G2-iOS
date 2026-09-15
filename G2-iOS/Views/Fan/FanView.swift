@@ -2,10 +2,16 @@
 //  FanView.swift
 //  G2-iOS
 //
-//  Full fan-control surface (§6.2). Every opcode is wired: Auto (0x03), TVOC Auto
-//  (0x0A), Off/Low/Med/High/Max (0x04–0x08), manual slider (0x02, debounced),
-//  and Refresh (0x09). The device's reported speed (byte 23) is the source of truth
-//  and is reflected back into the slider whenever the user isn't dragging.
+//  Full fan-control surface. Every opcode is wired: Auto (0x03), Custom (0x0A),
+//  Off/Low/Med/High/Max (0x04–0x08), manual slider (0x02, debounced), and Refresh
+//  (0x09). The device's reported speed is the source of truth and is reflected
+//  back into the slider whenever the user isn't dragging.
+//
+//  ⚠️ UNREFERENCED. ConditioningView superseded this screen (it adds ionizer
+//  health, device-mirrored mode and the Manual-0 % warning) and is what
+//  MainTabView presents. Carried through the SEN66 migration only far enough to
+//  keep the target compiling — it does NOT implement the §5 mode-mirroring
+//  rules. Delete it, or re-point MainTabView at it, rather than leaving both.
 //
 
 import SwiftUI
@@ -167,7 +173,7 @@ struct FanView: View {
     private func applyMode(_ newMode: FanMode) {
         switch newMode {
         case .auto:     bluetooth.setFanAuto()
-        case .tvocAuto: bluetooth.setFanTVOCAuto()
+        case .custom:   bluetooth.setFanCustom()
         case .manual:   break   // user drives via presets/slider
         }
     }

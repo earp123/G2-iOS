@@ -17,6 +17,166 @@ the app version tracks [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] — targeting 1.0.0
 
+### SEN66 migration — GATT contract v2, full sensor surface, settings v2, device naming
+
+**Breaking.** This release speaks **GATT contract v2** and is **not compatible
+with SPS30-era firmware**. It requires firmware branch `SEN66` of
+`earp123/G2-Air-Quality-Monitor` (contract version 2, log record version 2).
+A v1 device is detected on connect and refused rather than mis-decoded.
+
+Contract verified byte-for-byte against firmware `docs/sen66-migration.md` §6 and
+`docs/gatt-v2-ios-notes.md` (firmware commit `18746cd`).
+
+#### Wire contract v2
+
+| Surface | v1 | v2 |
+|---|---|---|
+| Sensor Data `7A3E4F5C-…` | 31 B, marker `0x02`, decode from byte 8 | **52 B**, marker `0x03`, decode from **byte 0** |
+| History packet | 31 B | **34 B** |
+| Log record `geue_log_record_t` | 22 B | **26 B** |
+| Settings `7A3E4F5E-…` | 8 B | **12 B** (always written in full) |
+| Device Name `7A3E4F5F-…` | — | **new**, READ + WRITE, 1–20 B UTF-8 |
+| Device Info `7A3E4F60-…` | — | **new**, READ, 40 B |
+
+Service UUID and the four existing characteristic UUIDs are unchanged.
+
+**Live packet (52 B).** `0` marker `0x03` · `1` payload version `0x02` ·
+`2–3` seq u16 · `4–5` temp i16 ×100 °C · `6–7` RH u16 ×100 % ·
+`8–9` VOC index u16 ×10 · `10–11` NOx index u16 ×10 · `12–13` CO₂ u16 ppm ·
+`14–21` PM1.0 / PM2.5 / PM4.0 / PM10 u16 ×10 µg/m³ ·
+`22–31` NC0.5 / NC1.0 / NC2.5 / NC4.0 / NC10 u16 ×10 #/cm³ ·
+`32` aq_class u8 0–5 · `33` fan % u8 · `34` fan mode u8 (0 Auto / 1 Custom / 2 Manual) ·
+`35` status u8 · `36–39` SEN66 device status u32 ·
+`40–45` raw VOC ticks / raw NOx ticks / raw CO₂ ppm u16 ·
+`46–47` raw RH i16 **×100** · `48–49` raw T i16 **×200** ·
+`50` device state u8 · `51` reserved.
+
+> The two temperature scales differ deliberately: compensated temperature is
+> ÷100, the sensor-native raw temperature is ÷200. Dividing the raw field by 100
+> reads twice as hot as reality.
+
+**Status byte 35.** bit0 SEN66 present · bit1 fresh sample this tick ·
+bit2 SEN66 warming · bit3 TWAI online · bit4 SEN66 sticky error ·
+bit5 ionizer fault · bit6 ionizer on · bit7 reserved.
+
+**Log record v2 (26 B).** `timestamp u32 | temp i16 ×100 | rh u16 ×100 |
+voc u16 ×10 | nox u16 ×10 | co2 u16 | pm1 | pm25 | pm4 | pm10 (u16 ×10) |
+aq_class u8 | status u8 | seq u16`. Number concentrations and raw values are
+live-only, never logged.
+
+**Settings (12 B).** `[0–7]` VOC-index thresholds lo/med/hi/max 4×u16
+(1–500, defaults **100/150/250/400**) · `[8]` LED brightness u8 5–100 (default 50) ·
+`[9]` fan mode u8 · `[10]` fan manual % u8 · `[11]` reserved.
+
+**Device Info (40 B).** `[0–31]` SEN66 serial ASCII NUL-padded · `[32]` fw major ·
+`[33]` fw minor · `[34]` contract version · `[35]` log record version · `[36–39]` reserved.
+
+**New opcodes.** `0x0D` SEN66 fan cleaning · `0x0E` forced CO₂ recalibration
+`[ppm u16 LE]` (app sends 400) · `0x0F` clear SEN66 sticky errors.
+`0x01`–`0x0C` unchanged; `0x0A` is now labelled **Custom**.
+
+#### Added
+- **Full SEN66 metric surface.** Dashboard tiles for Temperature, Humidity,
+  VOC index, NOx index, CO₂, PM1.0, PM2.5, PM4.0 and PM10. A collapsed-by-default
+  **Sensor detail** disclosure carries the five number concentrations, raw VOC/NOx
+  ticks, raw CO₂, raw uncompensated RH/T, SEN66 serial and firmware, device state,
+  and the SEN66 device status register — with the **fan-speed warning (bit 21)
+  surfaced as a yellow advisory row**, distinct from the five red error bits.
+- **Device Name characteristic.** Name a unit from Settings, enforced at **20 UTF-8
+  bytes, not 20 characters** (the editor counts and truncates on bytes, never
+  splitting a scalar). A one-time, skippable naming sheet is offered on connect for
+  a unit still reporting its factory default name, and never shown again for that
+  peripheral.
+- **LED brightness slider**, 5–100 %, pre-populated from settings byte 8 and
+  debounced to a single 12-byte write on release.
+- **Sensor maintenance** in Settings: *Clean sensor fan* (`0x0D`, ~12 s, disabled
+  while the sensor is warming because firmware ignores it then), *Clear sensor
+  errors* (`0x0F`), and *Calibrate CO₂ outdoors* (`0x0E` at 400 ppm, behind a
+  confirmation alert stating the ≥ 3 minutes outdoors requirement).
+- **Device Info diagnostics** — serial, SEN66 firmware, contract version (red row
+  and explanation when it is not 2), and log record version.
+- **Incompatible-firmware guard.** A device reporting a contract or log-record
+  version this build does not implement has its live packets **refused**, with a
+  full-screen explanation, rather than decoded into plausible-looking numbers.
+  An all-zero Device Info is treated as "no SEN66 attached at boot" — which is
+  what firmware reports in that case — not as a version mismatch.
+- **Sensor-disconnected state.** Status bit 0 clear now reads as "Sensor
+  disconnected" instead of a screen of dashes presented as readings.
+- **MTU guard** in diagnostics: the 52-byte packet needs an ATT MTU of at least
+  55, and a smaller negotiated value is flagged red.
+- **Golden-vector test target** (`G2-iOSTests`, Swift Testing) — see Tests below.
+
+#### Changed
+- **"TVOC Auto" is now "Custom".** Opcode `0x0A` is unchanged, but its thresholds
+  are a **VOC index (1–500)**, not TVOC ppb. `TVOCThresholds` → `VOCThresholds`,
+  defaults 150/350/650/1000 → **100/150/250/400**, Settings header
+  "FAN MAPPING (CUSTOM)".
+- **The fan mode picker mirrors the device** (live byte 34) instead of holding
+  app-local state. A device-driven update no longer echoes back as a command;
+  selecting Manual sends the on-screen speed, since Manual has no mode opcode.
+- **Air-quality hero is `aq_class`**, derived in firmware (worst component wins
+  across VOC, NOx, CO₂ and PM) and never re-derived in the app — the band edges
+  live in firmware and are pending client sign-off. `AQILevel.warmingUp` became
+  `.unknown`, rendering as "Warming up" only when status bit 2 is set and "—"
+  otherwise.
+- **Freshness** combines the device's own "fresh this tick" flag (status bit 1)
+  with packet age, so a repeated cached sample reads as "Live — repeating last
+  sample" rather than as a new reading.
+- **History chart metric picker** is now a `.menu` picker: eight metrics
+  (Temp/RH, VOC index, NOx index, CO₂, PM1.0, PM2.5, PM4.0, PM10) no longer fit a
+  segmented control.
+- **CSV export columns** follow log-record v2 field order — `voc_index`,
+  `nox_index`, `co2_ppm`, `pm4_ugm3` and the new status bits replace `tvoc_ppb`,
+  `eco2_ppm` and the AHT21/ENS160/BMV080 columns.
+- **Scan list** refreshes a peripheral's advertised name on every advertisement,
+  not just its RSSI, so a renamed unit updates in place. `peripheral.name` is
+  still only a fallback for when `CBAdvertisementDataLocalNameKey` is absent.
+- **Simulator** synthesises real 52-byte v2 live packets and 34-byte history
+  packets through the production parsers, including a warm-up window, PM and
+  over-range sentinels, and a fan-speed warning.
+
+#### Removed
+- `tvoc`/`eco2` from the history record — **removed, not renamed**: a VOC index is
+  not a ppb concentration and SEN66 CO₂ is measured rather than equivalent.
+- The eight fake advertising-header bytes that prefixed the v1 live payload;
+  `sensorPayloadDecodeOffset` is now 0.
+- The AHT21 / ENS160 / BMV080 status-bit labels, replaced by the v2 bit map.
+
+#### Migration
+- **Cached history is discarded.** The `ModelContainer` now points at a new store
+  file (`history-v2.store`) and the pre-v2 store (plus its WAL/SHM sidecars) is
+  deleted on first launch. The app is pre-1.0 with no production data, so there is
+  no versioned SwiftData migration — the record's *semantics* changed, not just
+  its shape.
+- A firmware **log-record version change** additionally wipes every cached row on
+  the first sync of a launch, tracked in `UserDefaults`.
+- Firmware erases its own flash ring on first boot of the SEN66 build, so expect
+  an empty history until records accumulate at ~1/min.
+
+#### Tests
+`G2-iOSTests` (Swift Testing), **48 tests in 5 suites, all passing**. Payloads are
+hand-authored golden vectors written from the firmware byte tables — not produced
+by the app's own encoders, which would pass even if both sides drifted together.
+
+Covered: a fully valid 52-byte packet (every field, in display units) · all-invalid
+sentinels · PM `0xFFFE` over-range (and that `0xFFFE` is *not* folded away for
+non-PM fields) · warming state (bit 2 + aq_class 0) vs. plain unknown · rejection
+of a 31-byte legacy packet, a legacy `0x02` marker, a stray history marker and an
+unexpected payload version · short and sliced payloads · a 34-byte history packet
+and its end-of-sync sentinel · rejection of 31-byte v1 history · 12-byte settings
+encode/decode round-trip with brightness floor/ceiling clamping · threshold
+monotonicity and 1–500 range · fan-mode wire mapping · device-name byte-length
+validation with multi-byte UTF-8 and scalar-safe truncation · 40-byte Device Info
+including a wrong contract version and an absent sensor.
+
+Build: **BUILD SUCCEEDED**, **zero compiler warnings**, Swift 6 strict
+concurrency, iOS 17.0 target. Verified running in Simulator: warm-up → live
+transition, all nine metric tiles, mode picker mirroring, the naming sheet
+appearing once and not again, the `.menu` metric picker, and VOC-index history
+charting.
+
+---
+
 ### History CSV export and branding update
 
 #### Added

@@ -2,8 +2,8 @@
 //  HistoryDetailView.swift
 //  G2-iOS
 //
-//  Full breakdown of a single history record (§4.2): all fields, decoded status
-//  bits, and the AQI label. Sentinel fields render as "—".
+//  Full breakdown of a single history record (§3): all log-record v2 fields,
+//  decoded status bits, and the air-quality class. Sentinel fields render as "—".
 //
 
 import SwiftUI
@@ -23,15 +23,19 @@ struct HistoryDetailView: View {
                     Divider().overlay(Theme.hairline)
                     InfoRow(label: "Humidity", value: record.humidityPct.map { String(format: "%.2f %%", $0) } ?? "—")
                     Divider().overlay(Theme.hairline)
-                    InfoRow(label: "TVOC", value: record.tvocPpb.map { "\($0) ppb" } ?? "—")
+                    InfoRow(label: "VOC index", value: record.vocIndex.map { String(format: "%.1f", $0) } ?? "—")
                     Divider().overlay(Theme.hairline)
-                    InfoRow(label: "eCO₂", value: record.eco2Ppm.map { "\($0) ppm" } ?? "—")
+                    InfoRow(label: "NOx index", value: record.noxIndex.map { String(format: "%.1f", $0) } ?? "—")
                     Divider().overlay(Theme.hairline)
-                    InfoRow(label: "PM1.0", value: record.pm1.map { "\($0) µg/m³" } ?? "—")
+                    InfoRow(label: "CO₂", value: record.co2Ppm.map { String(format: "%.0f ppm", $0) } ?? "—")
                     Divider().overlay(Theme.hairline)
-                    InfoRow(label: "PM2.5", value: record.pm25.map { "\($0) µg/m³" } ?? "—")
+                    InfoRow(label: "PM1.0", value: record.pm1.map { String(format: "%.1f µg/m³", $0) } ?? "—")
                     Divider().overlay(Theme.hairline)
-                    InfoRow(label: "PM10", value: record.pm10.map { "\($0) µg/m³" } ?? "—")
+                    InfoRow(label: "PM2.5", value: record.pm25.map { String(format: "%.1f µg/m³", $0) } ?? "—")
+                    Divider().overlay(Theme.hairline)
+                    InfoRow(label: "PM4.0", value: record.pm4.map { String(format: "%.1f µg/m³", $0) } ?? "—")
+                    Divider().overlay(Theme.hairline)
+                    InfoRow(label: "PM10", value: record.pm10.map { String(format: "%.1f µg/m³", $0) } ?? "—")
                     Divider().overlay(Theme.hairline)
                     InfoRow(label: "Sequence", value: "#\(record.sequence)")
                 }
@@ -49,10 +53,10 @@ struct HistoryDetailView: View {
 
     private var aqiHeader: some View {
         VStack(spacing: 6) {
-            Text(record.aqiLevel.isValid ? "\(record.aqi)" : "—")
+            Text(record.aqiLevel.isValid ? "\(record.aqClass)" : "—")
                 .font(.system(size: 56, weight: .bold, design: .rounded))
                 .foregroundStyle(record.aqiLevel.color)
-            Text(record.aqiLevel.label)
+            Text(record.aqClassLabel)
                 .font(.headline)
                 .foregroundStyle(Theme.textPrimary)
         }
@@ -64,7 +68,7 @@ struct HistoryDetailView: View {
 
     private var statusCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("SENSOR STATUS")
+            Text("DEVICE STATUS")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(Theme.textSecondary)
             ForEach(record.deviceStatus.indicators) { indicator in
@@ -78,10 +82,23 @@ struct HistoryDetailView: View {
 /// One decoded status-bit indicator row, reused in Settings diagnostics (§6.4).
 struct StatusIndicatorRow: View {
     let indicator: StatusIndicator
+
+    /// A set fault bit is a problem, not a satisfied check — the two read
+    /// differently so "SEN66 sticky error: on" can't be mistaken for healthy.
+    private var iconName: String {
+        if indicator.isFault { return indicator.isOn ? "exclamationmark.triangle.fill" : "checkmark.circle" }
+        return indicator.isOn ? "checkmark.circle.fill" : "xmark.circle"
+    }
+
+    private var tint: Color {
+        if indicator.isFault { return indicator.isOn ? Theme.aqiUnhealthy : Theme.textSecondary }
+        return indicator.isOn ? Theme.aqiExcellent : Theme.textSecondary
+    }
+
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: indicator.isOn ? "checkmark.circle.fill" : "xmark.circle")
-                .foregroundStyle(indicator.isOn ? Theme.aqiExcellent : Theme.textSecondary)
+            Image(systemName: iconName)
+                .foregroundStyle(tint)
             Text(indicator.label)
                 .font(.subheadline)
                 .foregroundStyle(Theme.textPrimary)

@@ -35,7 +35,7 @@ final class HistoryStore {
     private let dataStore: HistoryDataStore
     private let listContext: ModelContext   // main-actor context for List rows
 
-    var selectedMetric: HistoryMetric = .tvoc {
+    var selectedMetric: HistoryMetric = .vocIndex {
         didSet { if oldValue != selectedMetric { refresh(chartsOnly: true) } }
     }
     var selectedRange: HistoryRange = .day {

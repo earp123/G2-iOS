@@ -2,26 +2,45 @@
 //  SensorParser.swift
 //  G2-iOS
 //
-//  Defensive, length-checked decoder for the 31-byte Sensor Data payload (§2.3).
+//  Defensive, length-checked decoder for the 52-byte Sensor Data payload (§1.1).
 //
-//  Critical: bytes 0–7 are embedded BLE advertising-header bytes carried *inside*
-//  the GATT payload. Decoding starts at byte 8 (GATT.sensorPayloadDecodeOffset).
-//  No force-unwraps; a short payload yields `.failure(.malformedPacket)` rather
-//  than a crash, and sentinels become `Metric.invalid`.
+//  Contract v2 decodes from byte 0 — the eight fake advertising-header bytes that
+//  prefixed the v1 payload are gone. Byte 0 must be the live marker 0x03; the
+//  retired v1 marker 0x02 is rejected, not best-effort decoded, because every
+//  field behind it moved (§1.1).
+//
+//  No force-unwraps: a short, mis-marked or wrong-version payload yields a
+//  `.failure` the UI reports non-fatally, never a crash. Every scaled field goes
+//  through the shared `GATT.decode*` family so a sentinel rule is defined once.
 //
 
 import Foundation
 
 enum SensorParseError: Error, Equatable, Sendable {
-    /// Payload shorter than the required 31 bytes (§2.3 / §7).
+    /// Payload shorter than the required 52 bytes (§1.1 / §7).
     case malformedPacket(length: Int)
+    /// Byte 0 was not the live-v2 marker. Carries the marker actually seen, so a
+    /// legacy `0x02` device is identifiable from the message (§1.1).
+    case unsupportedMarker(UInt8)
+    /// Byte 1 was not payload version 0x02 (§1.1).
+    case unsupportedPayloadVersion(UInt8)
+
+    /// User-facing, non-fatal description (§7).
+    var message: String {
+        switch self {
+        case .malformedPacket(let length):
+            "Malformed packet (\(length) bytes, expected \(GATT.sensorPayloadLength))"
+        case .unsupportedMarker(let marker) where marker == GATT.legacyLivePacketMarker:
+            "Device is running pre-SEN66 firmware (legacy 0x02 packet) — update required"
+        case .unsupportedMarker(let marker):
+            String(format: "Unrecognised packet marker 0x%02X", marker)
+        case .unsupportedPayloadVersion(let version):
+            String(format: "Unsupported payload version 0x%02X", version)
+        }
+    }
 }
 
 enum SensorParser {
-
-    // Invalid sentinels (§2.3).
-    private static let tempSentinel: Int16   = Int16(bitPattern: 0x8000)  // INT16_MIN
-    private static let u16Sentinel: UInt16   = 0xFFFF
 
     /// Parses a raw characteristic payload into a `SensorReading`.
     ///
@@ -35,48 +54,65 @@ enum SensorParser {
         // `Data` may be sliced with a non-zero startIndex; normalise to a
         // 0-based array so fixed offsets from the spec are always valid.
         let b = [UInt8](data)
-        let o = GATT.sensorPayloadDecodeOffset  // start decoding at byte 8
+        let o = GATT.SensorOffset.self
 
-        // Multi-byte fields are little-endian.
-        let tempRaw = readInt16LE(b, o + 0)     // bytes 8–9
-        let humRaw  = readUInt16LE(b, o + 2)    // bytes 10–11
-        let tvocRaw = readUInt16LE(b, o + 4)    // bytes 12–13
-        let eco2Raw = readUInt16LE(b, o + 6)    // bytes 14–15
-        let pm1Raw  = readUInt16LE(b, o + 8)    // bytes 16–17
-        let pm25Raw = readUInt16LE(b, o + 10)   // bytes 18–19
-        let pm10Raw = readUInt16LE(b, o + 12)   // bytes 20–21
-        let aqiRaw  = b[o + 14]                  // byte 22
-        let fanRaw  = b[o + 15]                  // byte 23
-        let statRaw = b[o + 16]                  // byte 24
-        let seqRaw  = readUInt16LE(b, o + 17)   // bytes 25–26
-        // bytes 27–30 reserved — ignored.
+        // Reject anything that isn't a live v2 packet — including the retired
+        // 0x02 layout, whose fields all sit at different offsets (§1.1).
+        guard b[o.marker] == GATT.livePacketMarker else {
+            return .failure(.unsupportedMarker(b[o.marker]))
+        }
+        guard b[o.payloadVersion] == GATT.livePayloadVersion else {
+            return .failure(.unsupportedPayloadVersion(b[o.payloadVersion]))
+        }
 
         let reading = SensorReading(
-            temperatureC: tempRaw == tempSentinel ? .invalid : .valid(Double(tempRaw) / 100.0),
-            humidityPct:  humRaw  == u16Sentinel  ? .invalid : .valid(Double(humRaw) / 100.0),
-            tvocPpb:      tvocRaw == u16Sentinel  ? .invalid : .valid(Int(tvocRaw)),
-            eco2Ppm:      eco2Raw == u16Sentinel  ? .invalid : .valid(Int(eco2Raw)),
-            // PM has two invalid sentinels (0xFFFF no-reading, 0xFFFE over-range);
-            // GATT.decodePM folds both to nil so 0xFFFE never shows as 65534 (§ PM).
-            pm1:          Metric(GATT.decodePM(pm1Raw)),
-            pm25:         Metric(GATT.decodePM(pm25Raw)),
-            pm10:         Metric(GATT.decodePM(pm10Raw)),
-            aqi:          AQILevel(raw: aqiRaw),
-            fanSpeedPct:  Int(fanRaw),
-            status:       DeviceStatus(raw: statRaw),
-            sequence:     seqRaw,
-            receivedAt:   receivedAt
+            temperatureC:    Metric(GATT.decodeI16x100(readI16(b, o.temperature))),
+            humidityPct:     Metric(GATT.decodeU16x100(readU16(b, o.humidity))),
+            vocIndex:        Metric(GATT.decodeU16x10(readU16(b, o.vocIndex))),
+            noxIndex:        Metric(GATT.decodeU16x10(readU16(b, o.noxIndex))),
+            co2Ppm:          Metric(GATT.decodeU16(readU16(b, o.co2))),
+            // PM carries two invalid sentinels (0xFFFF no-reading, 0xFFFE
+            // over-range); decodePMx10 folds both to nil (§1).
+            pm1:             Metric(GATT.decodePMx10(readU16(b, o.pm1))),
+            pm25:            Metric(GATT.decodePMx10(readU16(b, o.pm25))),
+            pm4:             Metric(GATT.decodePMx10(readU16(b, o.pm4))),
+            pm10:            Metric(GATT.decodePMx10(readU16(b, o.pm10))),
+            nc05:            Metric(GATT.decodeU16x10(readU16(b, o.nc05))),
+            nc1:             Metric(GATT.decodeU16x10(readU16(b, o.nc1))),
+            nc25:            Metric(GATT.decodeU16x10(readU16(b, o.nc25))),
+            nc4:             Metric(GATT.decodeU16x10(readU16(b, o.nc4))),
+            nc10:            Metric(GATT.decodeU16x10(readU16(b, o.nc10))),
+            rawVOCTicks:     Metric(GATT.decodeU16(readU16(b, o.rawVOCTicks))),
+            rawNOxTicks:     Metric(GATT.decodeU16(readU16(b, o.rawNOxTicks))),
+            rawCO2Ppm:       Metric(GATT.decodeU16(readU16(b, o.rawCO2))),
+            rawHumidityPct:  Metric(GATT.decodeI16x100(readI16(b, o.rawHumidity))),
+            rawTemperatureC: Metric(GATT.decodeI16x200(readI16(b, o.rawTemperature))),
+            aqClass:         AQILevel(raw: b[o.aqClass]),
+            fanSpeedPct:     Int(b[o.fanPercent]),
+            fanMode:         FanMode(wire: b[o.fanMode]),
+            status:          DeviceStatus(raw: b[o.status]),
+            sen66Status:     SEN66Status(raw: readU32(b, o.sen66Status)),
+            deviceState:     DeviceState(rawValue: b[o.deviceState]),
+            sequence:        readU16(b, o.sequence),
+            receivedAt:      receivedAt
         )
         return .success(reading)
     }
 
     // MARK: - Little-endian readers (bounds already guaranteed by the length check)
 
-    private static func readUInt16LE(_ b: [UInt8], _ i: Int) -> UInt16 {
+    private static func readU16(_ b: [UInt8], _ i: Int) -> UInt16 {
         UInt16(b[i]) | (UInt16(b[i + 1]) << 8)
     }
 
-    private static func readInt16LE(_ b: [UInt8], _ i: Int) -> Int16 {
-        Int16(bitPattern: readUInt16LE(b, i))
+    private static func readI16(_ b: [UInt8], _ i: Int) -> Int16 {
+        Int16(bitPattern: readU16(b, i))
+    }
+
+    private static func readU32(_ b: [UInt8], _ i: Int) -> UInt32 {
+        UInt32(b[i])
+            | (UInt32(b[i + 1]) << 8)
+            | (UInt32(b[i + 2]) << 16)
+            | (UInt32(b[i + 3]) << 24)
     }
 }

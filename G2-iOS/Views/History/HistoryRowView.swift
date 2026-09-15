@@ -16,7 +16,7 @@ struct HistoryRowView: View {
             Circle()
                 .fill(record.aqiLevel.color)
                 .frame(width: 10, height: 10)
-                .accessibilityLabel("AQI \(record.aqiLevel.label)")
+                .accessibilityLabel("Air quality \(record.aqClassLabel)")
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(record.timestamp, format: .dateTime.month().day().hour().minute())
@@ -37,7 +37,8 @@ struct HistoryRowView: View {
 
     private var summary: String {
         let temp = record.temperatureC.map { String(format: "%.1f°C", $0) } ?? "—"
-        let tvoc = record.tvocPpb.map { "\($0) ppb" } ?? "—"
-        return "\(temp) · TVOC \(tvoc)"
+        let voc = record.vocIndex.map { String(format: "%.0f", $0) } ?? "—"
+        let co2 = record.co2Ppm.map { String(format: "%.0f ppm", $0) } ?? "—"
+        return "\(temp) · VOC \(voc) · CO₂ \(co2)"
     }
 }

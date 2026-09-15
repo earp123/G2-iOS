@@ -29,8 +29,8 @@ private struct CommandFeedbackToast: ViewModifier {
 
     private func toast(for feedback: CommandFeedback) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(Theme.aqiPoor)
+            Image(systemName: feedback.isSuccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(feedback.isSuccess ? Theme.aqiExcellent : Theme.aqiPoor)
             Text(message(for: feedback))
                 .font(.footnote.weight(.medium))
                 .foregroundStyle(Theme.textPrimary)
@@ -47,8 +47,9 @@ private struct CommandFeedbackToast: ViewModifier {
 
     private func message(for feedback: CommandFeedback) -> String {
         switch feedback {
-        case .rejected(let text): text
-        case .timedOut:           "The device didn’t respond to that write. Please try again."
+        case .rejected(let text):  text
+        case .succeeded(let text): text
+        case .timedOut:            "The device didn’t respond to that write. Please try again."
         }
     }
 }

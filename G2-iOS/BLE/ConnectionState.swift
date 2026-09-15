@@ -61,4 +61,9 @@ enum BluetoothAvailability: Equatable, Sendable {
 enum CommandFeedback: Equatable, Hashable, Sendable {
     case rejected(String)   // ATT 0x0E or other write failure
     case timedOut
+    /// Confirmation for an action with no visible immediate effect — the
+    /// maintenance commands 0x0D/0x0E/0x0F and a saved device name (§6).
+    case succeeded(String)
+
+    var isSuccess: Bool { if case .succeeded = self { return true }; return false }
 }
