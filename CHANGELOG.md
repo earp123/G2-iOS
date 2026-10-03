@@ -19,6 +19,22 @@ the app version tracks [Semantic Versioning](https://semver.org/).
 
 ### Thresholds v3 — GATT contract v3, adjustable thresholds, Custom mode retired
 
+#### At a glance
+- **New screen:** Settings → **Air quality thresholds** — every gas edge
+  (VOC / NOx / CO₂ C1–C4), PM edge (PM1 / PM2.5 / PM10 attention / hazard), fan
+  % per class, fan-down delay, ionizer run-on and hysteresis, edited on the
+  device and written as one 60-byte blob on **Save**; **Restore defaults** sends
+  opcode `0x10`. Inline errors use the firmware's exact rules, so a write the
+  device would reject is never sent.
+- **Two class tiles** (Gas, Particulate) replace the single air-quality number
+  on the Dashboard, history rows and record detail — one per LED on the device.
+- **Custom fan mode is gone** (opcode `0x0A`, the VOC threshold editor, the
+  Custom fan table). Fan mode is Auto or Manual.
+- **Needs firmware contract v3** (firmware `SEN66` with thresholds v3, Device
+  Info 3 / 3). Older firmware gets the update-required state; nothing is parsed.
+- **Status:** compiled and unit-tested on a Linux Swift 6.2.4 toolchain (120
+  tests pass); **Xcode build and bench test still to do** — see Tests below.
+
 **Breaking.** This build speaks **GATT contract v3** and needs firmware branch
 `SEN66` carrying firmware `docs/thresholds-v3.md` (Device Info **3 / 3**). A v2
 unit is refused with the existing update-required state — no crash, nothing
@@ -154,6 +170,28 @@ Xcode 26, run `G2-iOSTests`, and run the bench acceptance in
 `docs/thresholds-v3.md` §4 against a 3 / 3 unit. No app-allowed value that
 firmware would reject is known (§4 item 6): `validate()` mirrors the firmware's
 `thresholds_validate()`, including its hysteresis floor.
+
+---
+
+### Ad Hoc distribution build flow (tooling only — no app code changes)
+
+#### Added
+- **`Tools/adhoc.sh`** — archives the `G2-iOS` scheme (Release, generic iOS) and
+  exports an Ad Hoc `.ipa` to `build/adhoc/<timestamp>/` for client install via
+  Diawi. Ported from `MS-Neuro-iOS`; unlike that copy, a failed archive now fails
+  the script instead of being masked by the `xcpretty` pipe. Run with
+  `bash Tools/adhoc.sh` (or `chmod +x` once — the file was committed via API
+  without the executable bit).
+- **`ExportOptions-AdHoc.plist`** — `method ad-hoc`, automatic signing, team
+  `742QW9KJUK`, no thinning. Sits beside `ExportOptions-AppStore.plist`.
+- **`.gitignore`** — the repo had none; ignores `build/`, `DerivedData/`,
+  `xcuserdata/`, `*.ipa`, `*.dSYM`, `.DS_Store`.
+
+#### Prerequisites
+- Apple Distribution certificate in the login keychain of the build Mac.
+- Every client device UDID registered at developer.apple.com → Devices **before**
+  building; the Ad Hoc profile is baked into the `.ipa`, so re-run the script
+  after adding any UDID.
 
 ---
 
