@@ -18,6 +18,7 @@
 | Area | v2 | **v3** |
 |---|---|---|
 | Device Info bytes 34 / 35 | 2 / 2 | **3 / 3** — refuse to parse otherwise |
+| Live packet byte 1 (payload version) | `0x02` | **`0x03`** — firmware packs the contract version here (firmware §5) |
 | Live packet byte 32 | `aq_class` 0–5 (PM folded in) | **packed:** low nibble gas class 0–5, high nibble PM class 0–3 |
 | Log record byte 22 | `aq_class` 0–5 | same packed byte |
 | Live packet byte 34 `fan_mode` | 0 / 1 / 2 | **0 Auto · 2 Manual** (1 never sent) |

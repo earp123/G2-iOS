@@ -17,6 +17,139 @@ the app version tracks [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] — targeting 1.0.0
 
+### Thresholds v3 — GATT contract v3, adjustable thresholds, Custom mode retired
+
+**Breaking.** This build speaks **GATT contract v3** and needs firmware branch
+`SEN66` carrying firmware `docs/thresholds-v3.md` (Device Info **3 / 3**). A v2
+unit is refused with the existing update-required state — no crash, nothing
+parsed. Contract taken from firmware `docs/thresholds-v3.md` §2 and
+cross-checked against the firmware handoff note `docs/gatt-v3-ios-notes.md`;
+the default Thresholds golden vector matches the firmware's
+`thresholds_pack()` output byte for byte.
+
+#### Wire contract v3
+
+Lengths and UUIDs are unchanged (live 52, history 34, record 26, Settings 12,
+Device Info 40). What changed:
+
+| Surface | v2 | v3 |
+|---|---|---|
+| Device Info bytes 34 / 35 | 2 / 2 | **3 / 3** — anything else is refused |
+| Live byte 1 (payload version) | `0x02` | **`0x03`** |
+| Live byte 32 / log-record byte 22 | `aq_class` 0–5 (PM folded in) | **packed:** low nibble gas class 0–5, high nibble PM class 0–3 |
+| Live byte 34 / Settings byte 9 `fan_mode` | 0 / 1 / 2 | **0 Auto · 2 Manual** (1 never sent; rejected on write) |
+| Settings bytes 0–7 | VOC lo/med/hi/max | **retired** — read 0, always written 0 |
+| Opcode `0x0A` (Custom) | valid | **removed** — never sent |
+| Opcode `0x10` | — | **new:** restore thresholds to defaults |
+| Thresholds `7A3E4F61-8C2D-4E9A-B1F6-0D3C5E7F9A2B` | — | **new**, 60 B READ + WRITE |
+
+**Packed class byte.** `class_byte = (pm_class << 4) | gas_class`. Gas 0
+unknown/warming, 1–5 (worst of VOC / NOx / CO₂); PM 0 unknown/warming, 1 good,
+2 attention, 3 hazard (worst of PM1 / PM2.5 / PM10; PM4.0 is never
+classified). Neither class is re-derived from raw values — the edges are
+user-editable and only firmware applies them.
+
+**Thresholds blob (60 B, little-endian).** `0` version 1 · `1` reserved ·
+`2–9` VOC C1..C4 · `10–17` NOx C1..C4 · `18–25` CO₂ C1..C4 (u16) ·
+`26–37` PM1 / PM2.5 / PM10 attention, hazard (u16 µg/m³ ×10) ·
+`38–42` fan % gas class 1..5 · `43–45` fan % PM class 1..3 (u8) ·
+`46–47` fan-down delay s · `48–49` ionizer run-on min ·
+`50–55` hysteresis VOC / NOx / CO₂ · `56–57` PM hysteresis ×10 · `58–59` reserved.
+Defaults 100/150/250/350 · 20/50/100/200 · 800/1000/1500/2000 ·
+7.0/25.0 · 9.0/35.0 · 45.0/150.0 · 0/25/50/75/100 · 20/50/100 · 0 s · 60 min ·
+hysteresis 0.
+
+#### Added
+- **Settings → Air quality thresholds.** Gas classes as a 3 × 4 integer grid
+  (VOC / NOx / CO₂ × C1–C4), particulate as a 3 × 2 one-decimal grid (PM1.0 /
+  PM2.5 / PM10 × Attention / Hazard, µg/m³), fan response rows for gas class
+  1–5 and PM class 1–3 ("higher of the two wins"), fan-down delay and ionizer
+  run-on, and VOC / NOx / CO₂ / PM hysteresis — with one-line help for the four
+  behaviours. Read on connect; written whole on **Save**, which is enabled only
+  when every cell parses, every firmware rule passes and something changed;
+  then re-read so the form shows what the device stored. **Restore defaults**
+  asks first, sends `0x10`, re-reads and refreshes the form. Integer cells take
+  digits only; PM cells take one decimal (either separator) and round to it.
+  Nothing is persisted locally: a reconnect or relaunch reloads from the device.
+- **`ThresholdsBlob`** — `pack()`, `unpack(Data)` (exactly 60 bytes; reserved
+  bytes ignored) and `validate() -> ValidationError?` running **every** firmware
+  rule in the firmware's order: version 1; each gas row strictly increasing with
+  C4 ≤ 500 / 500 / 40000; PM attention < hazard; every fan % ≤ 100; delay ≤
+  3600 s; run-on ≤ 1440 min; each gas hysteresis below that row's smallest
+  adjacent-edge gap; PM hysteresis below the narrowest hazard − attention band.
+  No lower bound on any edge (C1 may be 0), exactly as firmware — the app is
+  never stricter than the device. `validationErrors()` lists them all for the
+  inline errors.
+- **Two class tiles** on the Dashboard — gas and PM, coloured like the device's
+  LEDs (gas 0 grey, 1–2 green, 3 orange, 4–5 red; PM 0 grey, 1 green, 2 orange,
+  3 red). History rows show two class dots and the record detail two tiles.
+- Opcode `0x10` (`GATT.Command.restoreThresholds`) and the Thresholds
+  characteristic in discovery.
+
+#### Changed
+- **Contract guard requires exactly 3 / 3.** The v2-era exemption for an
+  all-zero Device Info is gone: firmware always populates bytes 34–35, even
+  with no SEN66 at boot (gatt-v3 notes §1). An incompatible unit's Sensor Data,
+  history, Settings and Thresholds are not parsed, and it is not offered for
+  history sync (so the cache is never wiped on its account). Settings are
+  decoded only once Device Info has cleared the guard, so a v2 unit saved in
+  Custom never reaches the v3 decode.
+- **Live payload version is 3.** The iOS task doc's table omitted byte 1;
+  firmware packs `GEUE_CONTRACT_VERSION` there and its thresholds-v3 §5 lists
+  byte 1 among the changed live bytes. A v2 packet is rejected on byte 1 rather
+  than having byte 32 misread as a packed byte. (`docs/thresholds-v3.md` §1
+  now lists the row.)
+- **Fan mode is Auto / Manual.** A live or Settings fan mode of 1 decodes as
+  Auto and trips an assertion in debug builds; it should never arrive.
+- **12-byte Settings write always sends bytes 0–7 as zero.**
+- **Write errors.** ATT `0x0E` on the Thresholds or Settings characteristic
+  (firmware's content rejection) now gets that characteristic's own message and
+  re-read; the "unknown opcode" message is reserved for the Command
+  characteristic.
+- **History record.** `aqClass` keeps its column and now holds the gas class —
+  firmware's own `aq_class` became gas-only — so the CSV export's `aq_class`
+  column is unchanged in shape. A new optional `pmClass` column holds the PM
+  class (a lightweight SwiftData migration; no store reset). Records logged by
+  v2 firmware and still on flash decode with PM class 0 and render a grey PM
+  tile; the log-record version bump to 3 still wipes the cache on the first sync.
+- Simulator emits v3 packets and classifies them against its own Thresholds
+  blob as firmware does (whole-index VOC / NOx compare), so editing an edge
+  visibly moves a tile.
+
+#### Removed
+- **Custom fan mode** — `FanMode.custom`, `setFanCustom()`, opcode `0x0A`, the
+  "Switch to Custom" button, the Custom notes, the VOC INDEX THRESHOLDS editor,
+  `VOCThresholds` and the FAN MAPPING (CUSTOM) table. Deleted, not hidden.
+- The 8-byte settings write and the VOC-threshold pre-checks in `writeSettings`.
+
+#### Tests
+`G2-iOSTests` (Swift Testing) updated for v3 and extended: golden vectors for
+the v3 live packet (byte 1 = 3, class byte `0x23`, Manual), v2 live packet and
+Device Info 2 / 2 (both refused), a v3 history record and a pre-v3 record
+(grey PM), Settings with retired bytes, and the 60-byte Thresholds defaults
+(identical to firmware `thresholds_pack()`) plus an every-field-off-default
+vector. New suites: **ThresholdsBlobTests** (golden pack/unpack, round trips,
+per-field byte offsets, every rule passing and failing, firmware §4.9's six
+rejection cases, first-failure order), **ThresholdsFormTests** (input rules,
+×10 rounding, Save gating, inline error placement), **AirClassesTests** (nibble
+split and tile colours), **FanModeTests** (wire 1 → Auto with the assertion
+hook), plus Device Info guard 3 / 3 vs 2 / 2 and opcode `0x10`.
+
+**Not yet built or run in Xcode.** This change was made without access to a Mac
+or a Swift toolchain. Verified instead: every Swift file parses cleanly with a
+tree-sitter Swift grammar (the pre-change tree also parses cleanly, as a
+baseline); the golden vectors were recomputed independently from the firmware
+byte table and checked against firmware's own default-blob hex; and every
+expectation in the new and updated tests was evaluated against a line-for-line
+Python port of the blob, form, class-byte, Settings and Device Info logic (0
+failures). **Before shipping:** build in Xcode 26 (Swift 6, strict
+concurrency), run `G2-iOSTests`, and run the bench acceptance in
+`docs/thresholds-v3.md` §4 against a 3 / 3 unit. No app-allowed value that
+firmware would reject is known (§4 item 6): `validate()` was written against
+the firmware's `thresholds_validate()`.
+
+---
+
 ### SEN66 migration — GATT contract v2, full sensor surface, settings v2, device naming
 
 **Breaking.** This release speaks **GATT contract v2** and is **not compatible
