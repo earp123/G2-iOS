@@ -17,6 +17,28 @@ the app version tracks [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] — targeting 1.0.0
 
+### Ad Hoc distribution build flow (tooling only — no app code changes)
+
+#### Added
+- **`Tools/adhoc.sh`** — archives the `G2-iOS` scheme (Release, generic iOS) and
+  exports an Ad Hoc `.ipa` to `build/adhoc/<timestamp>/` for client install via
+  Diawi. Ported from `MS-Neuro-iOS`; unlike that copy, a failed archive now fails
+  the script instead of being masked by the `xcpretty` pipe. Run with
+  `bash Tools/adhoc.sh` (or `chmod +x` once — the file was committed via API
+  without the executable bit).
+- **`ExportOptions-AdHoc.plist`** — `method ad-hoc`, automatic signing, team
+  `742QW9KJUK`, no thinning. Sits beside `ExportOptions-AppStore.plist`.
+- **`.gitignore`** — the repo had none; ignores `build/`, `DerivedData/`,
+  `xcuserdata/`, `*.ipa`, `*.dSYM`, `.DS_Store`.
+
+#### Prerequisites
+- Apple Distribution certificate in the login keychain of the build Mac.
+- Every client device UDID registered at developer.apple.com → Devices **before**
+  building; the Ad Hoc profile is baked into the `.ipa`, so re-run the script
+  after adding any UDID.
+
+---
+
 ### SEN66 migration — GATT contract v2, full sensor surface, settings v2, device naming
 
 **Breaking.** This release speaks **GATT contract v2** and is **not compatible
