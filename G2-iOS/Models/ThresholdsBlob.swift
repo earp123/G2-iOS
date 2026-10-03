@@ -430,6 +430,22 @@ nonisolated struct ThresholdsBlob: Equatable, Sendable {
             }
         }
 
+        /// The editor row the field sits in — where its own input errors and its
+        /// rule's validation errors are shown together.
+        var row: ValidationError.Row {
+            switch self {
+            case .gasEdge(let channel, _):  .gasEdges(channel)
+            case .pmAttention(let channel),
+                 .pmHazard(let channel):    .pmEdges(channel)
+            case .fanGas:                   .fanGas
+            case .fanPM:                    .fanPM
+            case .fanDownDelay:             .fanDownDelay
+            case .ionizerRunOn:             .ionizerRunOn
+            case .hysteresis(let channel):  .hysteresis(channel)
+            case .hysteresisPM:             .hysteresisPM
+            }
+        }
+
         /// Largest value the wire field can hold — u8 for fan %, u16 otherwise.
         /// A sanity cap for input, not a firmware rule (`validate()` owns those).
         var wireMax: UInt16 {

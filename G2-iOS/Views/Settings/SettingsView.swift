@@ -2,14 +2,15 @@
 //  SettingsView.swift
 //  G2-iOS
 //
-//  LED brightness, device name, diagnostics, maintenance commands, time-sync and
-//  connection management (§6).
+//  Device name, air quality thresholds, LED brightness, diagnostics, maintenance
+//  commands, time-sync and connection management (§6; thresholds-v3 §3).
 //
 //  Everything that writes settings goes through the full 12-byte payload (§1.3),
 //  so editing one field never clobbers another; bytes 0–7 are retired in
 //  contract v3 and always written as zero (thresholds-v3 §2.3). The VOC-index
 //  threshold editor and the Custom fan-mapping table are gone with the Custom
-//  mode they drove.
+//  mode they drove; every band now lives in the Air quality thresholds section
+//  (`ThresholdsEditor`), which reads and writes the 60-byte Thresholds blob.
 //
 
 import SwiftUI
@@ -34,6 +35,7 @@ struct SettingsView: View {
         ScrollView {
             VStack(spacing: Theme.spacing) {
                 deviceNameCard
+                ThresholdsEditor()
                 brightnessCard
                 diagnostics
                 maintenanceCard
@@ -42,6 +44,7 @@ struct SettingsView: View {
             }
             .padding(Theme.spacing)
         }
+        .scrollDismissesKeyboard(.interactively)
         .background(Theme.background)
         .onAppear {
             bluetooth.readSettings()
