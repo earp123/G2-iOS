@@ -2,42 +2,36 @@
 //  DeviceSettingsTests.swift
 //  G2-iOSTests
 //
-//  Round-trip and validation tests for the 12-byte Settings payload, the Device
-//  Name length rule, and the 40-byte Device Info payload (§7).
+//  Round-trip and validation tests for the 12-byte Settings payload (contract
+//  v3: bytes 0–7 retired), the fan-mode wire mapping, command opcodes, the Device
+//  Name length rule, and the 40-byte Device Info payload and its version guard
+//  (§7; thresholds-v3 §2).
 //
 
 import Foundation
 import Testing
 @testable import G2_iOS
 
-@Suite("DeviceSettings — 12-byte settings payload v2")
+@Suite("DeviceSettings — 12-byte settings payload v3")
 struct DeviceSettingsTests {
 
     @Test("A 12-byte payload decodes to its documented fields")
     func decodesGoldenPayload() throws {
         let settings = try #require(DeviceSettings(data: GoldenVectors.data(GoldenVectors.settingsPayload)))
-        #expect(settings.thresholds == VOCThresholds(lo: 100, med: 150, hi: 250, max: 400))
-        #expect(settings.thresholds == .defaults)
+        #expect(settings == .defaults)
         #expect(settings.ledBrightnessPct == 50)
-        #expect(settings.fanMode == .custom)
+        #expect(settings.fanMode == .auto)
         #expect(settings.fanManualPct == 0)
     }
 
     @Test("Encode → decode round-trips every field")
     func encodeDecodeRoundTrip() throws {
-        let original = DeviceSettings(
-            thresholds: VOCThresholds(lo: 80, med: 200, hi: 300, max: 460),
-            ledBrightnessPct: 35,
-            fanMode: .manual,
-            fanManualPct: 60
-        )
+        let original = DeviceSettings(ledBrightnessPct: 35, fanMode: .manual, fanManualPct: 60)
         let encoded = original.encoded
         #expect(encoded.count == GATT.settingsPayloadLength)
 
         let decoded = try #require(DeviceSettings(data: encoded))
         #expect(decoded == original)
-        #expect(decoded.thresholds.lo == 80)
-        #expect(decoded.thresholds.max == 460)
         #expect(decoded.ledBrightnessPct == 35)
         #expect(decoded.fanMode == .manual)
         #expect(decoded.fanManualPct == 60)
@@ -46,15 +40,39 @@ struct DeviceSettingsTests {
     @Test("The encoded payload matches the documented byte layout exactly")
     func encodedLayoutMatchesContract() {
         let encoded = [UInt8](DeviceSettings.defaults.encoded)
+        #expect(encoded == GoldenVectors.settingsPayload)
         let o = GATT.SettingsOffset.self
-        // Thresholds little-endian: 100, 150, 250, 400.
-        #expect(Array(encoded[o.thresholds..<(o.thresholds + 8)])
-                == [0x64, 0x00, 0x96, 0x00, 0xFA, 0x00, 0x90, 0x01])
+        #expect(Array(encoded[o.retired ..< o.retired + o.retiredLength]) == [UInt8](repeating: 0, count: 8))
         #expect(encoded[o.ledBrightness] == 50)
         #expect(encoded[o.fanMode] == FanMode.auto.wire)
         #expect(encoded[o.fanManualPct] == 0)
         #expect(encoded[o.reserved] == 0)
         #expect(encoded.count == 12)
+    }
+
+    @Test("Retired bytes 0–7 are ignored on read and always written as zero")
+    func retiredBytesAreZeroOnWrite() throws {
+        let settings = try #require(
+            DeviceSettings(data: GoldenVectors.data(GoldenVectors.settingsPayloadWithRetiredBytes)))
+        #expect(settings.ledBrightnessPct == 50)
+        #expect(settings.fanMode == .manual)
+        #expect(settings.fanManualPct == 60)
+        // The old VOC thresholds 100/150/250/400 are not carried forward.
+        #expect([UInt8](settings.encoded) == [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x32, 0x02, 0x3C, 0x00,
+        ])
+    }
+
+    @Test("Every 12-byte write zeroes bytes 0–7, whatever the other fields hold")
+    func everyWriteZeroesRetiredBytes() {
+        for mode in [FanMode.auto, .manual] {
+            for pct in [UInt8(0), 1, 60, 100, 255] {
+                let bytes = [UInt8](DeviceSettings(ledBrightnessPct: 77, fanMode: mode, fanManualPct: pct).encoded)
+                #expect(bytes.count == 12)
+                #expect(bytes[0..<8].allSatisfy { $0 == 0 })
+                #expect(bytes[GATT.SettingsOffset.fanMode] == mode.wire)
+            }
+        }
     }
 
     @Test("The client always writes 12 bytes, never the legacy 8")
@@ -109,29 +127,6 @@ struct DeviceSettingsTests {
         #expect([UInt8](settings.encoded)[GATT.SettingsOffset.fanMode] == FanMode.auto.wire)
     }
 
-    // MARK: - Threshold validation (§1.3)
-
-    @Test("Defaults are monotonic and in range")
-    func defaultsAreValid() {
-        #expect(VOCThresholds.defaults.isMonotonic)
-        #expect(VOCThresholds.defaults.isInRange)
-        #expect(VOCThresholds.defaults.isValid)
-    }
-
-    @Test("Non-monotonic thresholds are rejected")
-    func nonMonotonicRejected() {
-        #expect(!VOCThresholds(lo: 200, med: 150, hi: 250, max: 400).isMonotonic)
-        #expect(!VOCThresholds(lo: 100, med: 100, hi: 250, max: 400).isMonotonic)   // equal, not <
-        #expect(!VOCThresholds(lo: 100, med: 150, hi: 400, max: 400).isMonotonic)
-    }
-
-    @Test("Thresholds outside the 1–500 index scale are rejected")
-    func outOfRangeRejected() {
-        #expect(!VOCThresholds(lo: 0, med: 150, hi: 250, max: 400).isInRange)      // 0 < min
-        #expect(!VOCThresholds(lo: 100, med: 150, hi: 250, max: 501).isInRange)    // > 500
-        #expect(VOCThresholds(lo: 1, med: 2, hi: 3, max: 500).isInRange)           // both ends legal
-    }
-
     @Test("Manual 0% is recognised as the fan-off-at-next-start state (§5)")
     func manualOffDetected() {
         var settings = DeviceSettings.defaults
@@ -146,21 +141,52 @@ struct DeviceSettingsTests {
         settings.fanManualPct = 0
         #expect(!settings.isManualOff)   // Auto at 0% is the controller's choice
     }
+}
 
-    @Test("Fan mode wire values match live byte 34 / settings byte 9")
+@Suite("FanMode — Auto / Manual, Custom retired")
+struct FanModeTests {
+
+    @Test("Wire values match live byte 34 / settings byte 9: 0 Auto, 2 Manual")
     func fanModeWireValues() {
         #expect(FanMode.auto.wire == 0)
-        #expect(FanMode.custom.wire == 1)
         #expect(FanMode.manual.wire == 2)
         #expect(FanMode(wire: 0) == .auto)
-        #expect(FanMode(wire: 1) == .custom)
         #expect(FanMode(wire: 2) == .manual)
         #expect(FanMode(wire: 3) == nil)
         #expect(FanMode(wire: 255) == nil)
-        // The renamed mode keeps opcode 0x0A (§1.6).
-        #expect(FanMode.custom.title == "Custom")
-        #expect(FanMode.custom.command == .fanCustom)
-        #expect(GATT.Command.fanCustom.rawValue == 0x0A)
+    }
+
+    @Test("The picker offers exactly Auto and Manual")
+    func onlyAutoAndManual() {
+        #expect(FanMode.allCases == [.auto, .manual])
+        #expect(FanMode.allCases.map(\.title) == ["Auto", "Manual"])
+        #expect(FanMode(rawValue: FanMode.retiredCustomWire) == nil)   // no case for 1
+        #expect(FanMode.auto.command == .fanAuto)
+        #expect(FanMode.manual.command == nil)
+    }
+
+    @Test("Byte value 1 (retired Custom) decodes as Auto and fires the debug-assertion hook")
+    func retiredCustomDecodesAsAuto() {
+        var hookFired = false
+        let mode = FanMode(wire: 1, onRetiredCustom: { hookFired = true })
+        #expect(mode == .auto)
+        #expect(hookFired)
+    }
+
+    @Test("Defined values never fire the retired-value hook", arguments: [UInt8(0), 2, 3, 255])
+    func definedValuesDoNotFireHook(wire: UInt8) {
+        var hookFired = false
+        _ = FanMode(wire: wire, onRetiredCustom: { hookFired = true })
+        #expect(!hookFired)
+    }
+
+    @Test("No settings write can carry fan mode 1, which firmware rejects")
+    func settingsNeverEncodeOne() {
+        for mode in [FanMode.auto, .manual, nil] {
+            let byte = [UInt8](DeviceSettings(ledBrightnessPct: 50, fanMode: mode, fanManualPct: 0).encoded)[
+                GATT.SettingsOffset.fanMode]
+            #expect(byte != FanMode.retiredCustomWire)
+        }
     }
 }
 
@@ -184,6 +210,13 @@ struct CommandTests {
         #expect(GATT.Command.fanCleaning.rawValue == 0x0D)
         #expect(GATT.Command.co2Recal.rawValue == 0x0E)
         #expect(GATT.Command.clearErrors.rawValue == 0x0F)
+    }
+
+    @Test("v3: 0x10 restores thresholds; 0x0A (Custom) no longer exists to be sent")
+    func v3Opcodes() {
+        #expect(GATT.Command.restoreThresholds.rawValue == 0x10)
+        #expect(GATT.Command(rawValue: 0x10) == .restoreThresholds)
+        #expect(GATT.Command(rawValue: 0x0A) == nil)
     }
 }
 
@@ -264,27 +297,63 @@ struct DeviceInfoTests {
         #expect(info.firmwareMajor == 1)
         #expect(info.firmwareMinor == 4)
         #expect(info.firmwareVersionText == "1.4")
-        #expect(info.contractVersion == 2)
-        #expect(info.logRecordVersion == 2)
+        #expect(info.contractVersion == 3)
+        #expect(info.logRecordVersion == 3)
         #expect(info.isContractSupported)
     }
 
-    @Test("A contract version other than 2 is reported, not accommodated (§9.3)")
-    func wrongContractVersionFlagged() throws {
-        var bytes = GoldenVectors.deviceInfoPayload
-        bytes[GATT.DeviceInfoOffset.contractVersion] = 3
-        let info = try #require(DeviceInfo(data: GoldenVectors.data(bytes)))
-        #expect(info.contractVersion == 3)
-        #expect(!info.isContractSupported)
+    @Test("This build implements contract 3 / log record 3")
+    func buildVersions() {
+        #expect(GATT.contractVersion == 3)
+        #expect(GATT.historyRecordVersion == 3)
     }
 
-    @Test("A unit that booted without a SEN66 reports an empty serial")
-    func absentSensorReportsZeros() throws {
-        let info = try #require(DeviceInfo(data: Data(repeating: 0, count: 40)))
+    @Test("Guard: 3 / 3 is accepted")
+    func guardAcceptsV3() throws {
+        let info = try #require(DeviceInfo(data: GoldenVectors.data(GoldenVectors.deviceInfoPayload)))
+        #expect(!info.requiresUpdate)
+    }
+
+    @Test("Guard: 2 / 2 lands in the update-required state (§9.3)")
+    func guardRefusesV2() throws {
+        let info = try #require(DeviceInfo(data: GoldenVectors.data(GoldenVectors.deviceInfoPayloadV2)))
+        #expect(info.contractVersion == 2)
+        #expect(info.logRecordVersion == 2)
+        #expect(!info.isContractSupported)
+        #expect(info.requiresUpdate)
+    }
+
+    @Test("Guard: anything but exactly 3 / 3 is refused", arguments: [
+        (UInt8(3), UInt8(2)), (2, 3), (4, 4), (3, 4), (0, 0), (0, 3), (3, 0),
+    ])
+    func guardRefusesMixedVersions(contract: UInt8, record: UInt8) throws {
+        var bytes = GoldenVectors.deviceInfoPayload
+        bytes[GATT.DeviceInfoOffset.contractVersion] = contract
+        bytes[GATT.DeviceInfoOffset.logRecordVersion] = record
+        let info = try #require(DeviceInfo(data: GoldenVectors.data(bytes)))
+        #expect(info.requiresUpdate)
+    }
+
+    @Test("A v3 unit that booted without a SEN66 still reports 3 / 3 and is accepted")
+    func absentSensorKeepsVersions() throws {
+        // Firmware zeroes only bytes 0–33 when the sensor is absent; the version
+        // bytes are always populated (gatt-v3 notes §1).
+        var bytes = [UInt8](repeating: 0, count: 40)
+        bytes[GATT.DeviceInfoOffset.contractVersion] = 3
+        bytes[GATT.DeviceInfoOffset.logRecordVersion] = 3
+        let info = try #require(DeviceInfo(data: GoldenVectors.data(bytes)))
         #expect(info.serial.isEmpty)
         #expect(info.serialText == "—")
+        #expect(info.firmwareVersionText == "0.0")
+        #expect(!info.requiresUpdate)
+    }
+
+    @Test("An all-zero Device Info is not a v3 device and is refused")
+    func allZeroInfoRefused() throws {
+        let info = try #require(DeviceInfo(data: Data(repeating: 0, count: 40)))
         #expect(info.contractVersion == 0)
         #expect(!info.isContractSupported)
+        #expect(info.requiresUpdate)
     }
 
     @Test("Payloads shorter than 40 bytes are rejected", arguments: [0, 32, 39])

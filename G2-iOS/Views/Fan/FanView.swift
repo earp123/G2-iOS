@@ -2,7 +2,7 @@
 //  FanView.swift
 //  G2-iOS
 //
-//  Full fan-control surface. Every opcode is wired: Auto (0x03), Custom (0x0A),
+//  Full fan-control surface. Every opcode is wired: Auto (0x03),
 //  Off/Low/Med/High/Max (0x04–0x08), manual slider (0x02, debounced), and Refresh
 //  (0x09). The device's reported speed is the source of truth and is reflected
 //  back into the slider whenever the user isn't dragging.
@@ -133,17 +133,14 @@ struct FanView: View {
         .card()
     }
 
-    // MARK: - Auto modes
+    // MARK: - Auto mode
 
     private var autoModeNote: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(mode == .auto ? "AQI-driven auto" : "TVOC-setpoint auto",
-                  systemImage: "wand.and.stars")
+            Label(FanMode.auto.note, systemImage: "wand.and.stars")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Theme.textPrimary)
-            Text(mode == .auto
-                 ? "The monitor adjusts the fan automatically based on the AQI reading."
-                 : "The monitor adjusts the fan using the TVOC thresholds. Edit them in Settings.")
+            Text("The monitor runs the fan at the higher of its gas-class and PM-class speeds.")
                 .font(.footnote)
                 .foregroundStyle(Theme.textSecondary)
         }
@@ -173,7 +170,6 @@ struct FanView: View {
     private func applyMode(_ newMode: FanMode) {
         switch newMode {
         case .auto:     bluetooth.setFanAuto()
-        case .custom:   bluetooth.setFanCustom()
         case .manual:   break   // user drives via presets/slider
         }
     }

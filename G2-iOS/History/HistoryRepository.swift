@@ -21,7 +21,7 @@ enum HistorySyncResult: Equatable, Sendable {
     case noRecords
 }
 
-/// Parsed field values from a single 26-byte `geue_log_record_t` v2 (§1.2). A
+/// Parsed field values from a single 26-byte `geue_log_record_t` v3 (§1.2). A
 /// plain Sendable struct so it can cross the AsyncStream and actor boundaries
 /// without touching SwiftData models.
 ///
@@ -38,7 +38,7 @@ struct HistoryRecordFields: Sendable {
     let pm25:         Double?
     let pm4:          Double?
     let pm10:         Double?
-    let aqClass:      Int       // 0–5 (0 = unknown/warming)
+    let classes:      AirClasses // byte 22, packed gas 0–5 / PM 0–3 (0 = unknown/warming)
     let status:       UInt8     // same bitfield as the live packet's byte 35
     let sequence:     UInt16
 }

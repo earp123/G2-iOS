@@ -2,7 +2,7 @@
 //  SensorReading.swift
 //  G2-iOS
 //
-//  A fully decoded live sensor packet — contract v2, 52 bytes (§1.1). Every field
+//  A fully decoded live sensor packet — contract v3, 52 bytes (§1.1). Every field
 //  that carries an invalid sentinel is surfaced as `Metric.invalid`, never as a
 //  real number.
 //
@@ -48,7 +48,9 @@ struct SensorReading: Equatable, Sendable {
 
     // MARK: - State
 
-    var aqClass: AQILevel              // byte 32, 0–5 (0 = unknown/warming)
+    /// Byte 32 — packed gas (low nibble) and PM (high nibble) classes, both
+    /// derived by firmware from the user-editable edges (thresholds-v3 §1.1).
+    var classes: AirClasses
     var fanSpeedPct: Int               // byte 33, 0–100
     /// Byte 34 — the device's own fan mode. `nil` for an undefined value; the
     /// Conditioning picker mirrors this rather than holding local state (§5).
@@ -63,9 +65,16 @@ struct SensorReading: Equatable, Sendable {
     var receivedAt: Date
 
     /// True when the device says the SEN66 has not finished warming up — the
-    /// only context in which a `0` air-quality class reads as "Warming up" (§2).
+    /// only context in which a `0` class reads as "Warming up" (§2).
     var isWarmingUp: Bool { status.sen66Warming }
 
-    /// Air-quality label with the warming-up context applied (§2).
-    var aqClassLabel: String { aqClass.label(isWarming: isWarmingUp) }
+    /// Gas class 0–5 — drives the gas tile (§1.1).
+    var gasLevel: AQILevel { AQILevel(raw: classes.gas) }
+    /// PM class 0–3 — drives the PM tile (§1.1).
+    var pmLevel: PMLevel { PMLevel(raw: classes.pm) }
+
+    /// Gas-class label with the warming-up context applied (§2).
+    var gasClassLabel: String { gasLevel.label(isWarming: isWarmingUp) }
+    /// PM-class label with the warming-up context applied (§2).
+    var pmClassLabel: String { pmLevel.label(isWarming: isWarmingUp) }
 }

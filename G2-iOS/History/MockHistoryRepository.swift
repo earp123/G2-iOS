@@ -96,7 +96,9 @@ final class MockHistoryRepository: HistoryRepository {
             let pm4  = max(0, 11.5 + dayPhase * 7.0 + pmSpike * 1.2 + Double.random(in: -3...3))
             let pm10 = max(0, 14.0 + dayPhase * 8.0 + pmSpike * 1.4 + Double.random(in: -4...4))
 
-            let aqClass = aqClassFor(vocIndex: vocIndex, noxIndex: noxIndex, co2: co2)
+            let classes = AirClasses(
+                gas: gasClassFor(vocIndex: vocIndex, noxIndex: noxIndex, co2: co2),
+                pm: pmClassFor(pm1: pm1, pm25: pm25, pm10: pm10))
             // Bit 0 SEN66 present · bit 1 fresh · bit 3 CAN online (0x0B), with an
             // occasional sticky-error blip (bit 4). Bit 6 ionizer powered; bit 5
             // ionizer fault ~5% of the time (§1.1).
@@ -119,7 +121,7 @@ final class MockHistoryRepository: HistoryRepository {
                 pm25:         gap ? nil : round(pm25 * 10) / 10,
                 pm4:          gap && Bool.random() ? nil : round(pm4 * 10) / 10,
                 pm10:         gap && Bool.random() ? nil : round(pm10 * 10) / 10,
-                aqClass:      gap ? 0 : aqClass,
+                classes:      gap ? .unknown : classes,
                 status:       status,
                 sequence:     sequence
             ))
@@ -136,11 +138,12 @@ final class MockHistoryRepository: HistoryRepository {
         }
     }
 
-    /// Mirrors the firmware's worst-component-wins air-quality class (firmware §4)
-    /// closely enough for believable synthetic data. The real band edges live in
-    /// firmware and are pending client sign-off — nothing in the app depends on
-    /// these values beyond the mock series.
-    private func aqClassFor(vocIndex: Double, noxIndex: Double, co2: Double) -> Int {
+    /// Stands in for the firmware's worst-of-three gas class, using the
+    /// thresholds-v3 default edges, so the synthetic series looks believable. Like
+    /// firmware, VOC and NOx are compared as whole index values. The real edges
+    /// are user-editable on the device; nothing outside this mock derives a class
+    /// from raw values.
+    private func gasClassFor(vocIndex: Double, noxIndex: Double, co2: Double) -> UInt8 {
         func vocBand(_ v: Double) -> Int {
             switch v {
             case ...100: 1
@@ -168,6 +171,20 @@ final class MockHistoryRepository: HistoryRepository {
             default:      5
             }
         }
-        return max(vocBand(vocIndex), noxBand(noxIndex), co2Band(co2))
+        return UInt8(max(vocBand(vocIndex.rounded(.towardZero)),
+                         noxBand(noxIndex.rounded(.towardZero)),
+                         co2Band(co2)))
+    }
+
+    /// Stands in for the firmware's worst-of-three PM class at the default
+    /// edges: ≤ attention → 1 good, ≤ hazard → 2 attention, else 3 hazard.
+    /// PM4.0 is never classified.
+    private func pmClassFor(pm1: Double, pm25: Double, pm10: Double) -> UInt8 {
+        func band(_ v: Double, attention: Double, hazard: Double) -> Int {
+            v <= attention ? 1 : v <= hazard ? 2 : 3
+        }
+        return UInt8(max(band(pm1,  attention: 7.0,  hazard: 25.0),
+                         band(pm25, attention: 9.0,  hazard: 35.0),
+                         band(pm10, attention: 45.0, hazard: 150.0)))
     }
 }

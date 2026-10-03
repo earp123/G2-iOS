@@ -3,21 +3,21 @@
 //  G2-iOSTests
 //
 //  Golden-vector tests for the 34-byte history packet and its 26-byte log
-//  record v2 (§7). Length is the only thing separating a v2 packet from the
+//  record v3 (§7). Length is the only thing separating a v2+ packet from the
 //  retired 31-byte v1 one on the wire, so the rejection cases matter as much as
-//  the decode.
+//  the decode. Record v3 changes only byte 22 — the packed class byte.
 //
 
 import Foundation
 import Testing
 @testable import G2_iOS
 
-@Suite("HistoryPacketParser — history packet v2")
+@Suite("HistoryPacketParser — history packet, log record v3")
 struct HistoryPacketParserTests {
 
     // MARK: - Record decode
 
-    @Test("A 34-byte history packet decodes every log-record v2 field")
+    @Test("A 34-byte history packet decodes every log-record v3 field")
     func historyRecordDecodes() throws {
         guard case .record(let f, let index, let total) =
                 try #require(HistoryPacketParser.parse(GoldenVectors.data(GoldenVectors.historyPacket)))
@@ -39,8 +39,43 @@ struct HistoryPacketParserTests {
         #expect(f.pm25 == 7.2)
         #expect(f.pm4 == 9.1)
         #expect(f.pm10 == 12.0)
-        #expect(f.aqClass == 2)
+        #expect(f.classes == AirClasses(gas: 2, pm: 1))
         #expect(f.status == 0x0B)
+        #expect(f.sequence == 777)
+    }
+
+    // MARK: - Packed class byte at record byte 22 (thresholds-v3 §2.7)
+
+    @Test("Record byte 22 splits into gas (low nibble) and PM (high nibble)", arguments: [
+        (UInt8(0x12), UInt8(2), UInt8(1)), (0x35, 5, 3), (0x20, 0, 2), (0x04, 4, 0),
+    ])
+    func recordClassByteDecodes(byte: UInt8, gas: UInt8, pm: UInt8) throws {
+        var bytes = GoldenVectors.historyPacket
+        bytes[GATT.historyRecordOffset + GATT.HistoryRecordOffset.classByte] = byte
+        guard case .record(let f, _, _) =
+                try #require(HistoryPacketParser.parse(GoldenVectors.data(bytes)))
+        else {
+            Issue.record("expected a record packet")
+            return
+        }
+        #expect(f.classes.gas == gas)
+        #expect(f.classes.pm == pm)
+    }
+
+    @Test("A record logged before v3 decodes its gas class with an unknown PM class")
+    func preV3RecordHasUnknownPMClass() throws {
+        guard case .record(let f, _, _) =
+                try #require(HistoryPacketParser.parse(GoldenVectors.data(GoldenVectors.historyPacketPreV3Record)))
+        else {
+            Issue.record("expected a record packet")
+            return
+        }
+        // aq_class 2 with the high nibble 0 → gas 2, PM unknown (grey tile).
+        #expect(f.classes == AirClasses(gas: 2, pm: 0))
+        #expect(AQILevel(raw: f.classes.gas) == .good)
+        #expect(PMLevel(raw: f.classes.pm) == .unknown)   // rendered grey — see AirClassesTests
+        // Every other field of the record is unchanged by the class-byte rule.
+        #expect(f.vocIndex == 88.0)
         #expect(f.sequence == 777)
     }
 
@@ -105,7 +140,7 @@ struct HistoryPacketParserTests {
     @Test("A record that is zero except for one byte is NOT the sentinel")
     func nearlyZeroRecordIsNotSentinel() throws {
         var bytes = GoldenVectors.historySentinelPacket
-        bytes[GATT.historyRecordOffset + GATT.HistoryRecordOffset.aqClass] = 1
+        bytes[GATT.historyRecordOffset + GATT.HistoryRecordOffset.classByte] = 1
         guard case .record = try #require(HistoryPacketParser.parse(GoldenVectors.data(bytes))) else {
             Issue.record("only an entirely zero record is the end-of-sync sentinel")
             return
@@ -126,7 +161,7 @@ struct HistoryPacketParserTests {
         #expect(HistoryPacketParser.parse(GoldenVectors.data(bytes)) == nil)
     }
 
-    @Test("A live v2 packet reaching the history parser is rejected on its marker")
+    @Test("A live packet reaching the history parser is rejected on its marker")
     func livePacketRejected() {
         #expect(HistoryPacketParser.parse(GoldenVectors.data(GoldenVectors.validLivePacket)) == nil)
     }

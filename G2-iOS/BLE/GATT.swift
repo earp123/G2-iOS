@@ -2,20 +2,28 @@
 //  GATT.swift
 //  G2-iOS
 //
-//  Authoritative Smart Air System (G2) BLE GATT contract — **contract v2 (SEN66)**.
+//  Authoritative Smart Air System (G2) BLE GATT contract — **contract v3 (SEN66,
+//  thresholds v3)**.
 //
 //  ⚠️ SOURCE OF TRUTH — these values mirror firmware branch `SEN66` of
-//  earp123/G2-Air-Quality-Monitor: `docs/sen66-migration.md` §6 and the iOS
-//  handoff note `docs/gatt-v2-ios-notes.md` (firmware commit 18746cd), verified
-//  byte-for-byte 2026-09-14. Where the two disagree, the handoff note wins.
-//  Do NOT change, guess, or "improve" any UUID, opcode, byte offset, scaling
-//  factor, or sentinel. If a value is missing here, ask before assuming.
+//  earp123/G2-Air-Quality-Monitor: `docs/thresholds-v3.md` §2 for everything v3
+//  changed, and `docs/sen66-migration.md` §6 / `docs/gatt-v2-ios-notes.md`
+//  (firmware commit 18746cd) for everything it left alone. Where they disagree,
+//  thresholds-v3 wins. Do NOT change, guess, or "improve" any UUID, opcode, byte
+//  offset, scaling factor, or sentinel. If a value is missing here, ask before
+//  assuming.
 //
-//  Contract v2 is NOT compatible with SPS30-era firmware: the live packet
+//  Contract v2 was NOT compatible with SPS30-era firmware: the live packet
 //  (31 → 52 bytes), the history packet (31 → 34 bytes), the log record
 //  (22 → 26 bytes) and the settings payload (8 → 12 bytes) all changed shape,
 //  and the live marker moved from 0x02 to 0x03. Legacy payloads are rejected,
 //  never best-effort decoded.
+//
+//  Contract v3 keeps every length and every UUID, but changes meaning (§2):
+//  live byte 32 / log-record byte 22 become a packed gas + PM class byte, live
+//  byte 1 carries payload version 3, the fan mode loses Custom (value 1), settings
+//  bytes 0–7 are retired, opcode 0x0A is removed, opcode 0x10 is new, and a 60-byte
+//  Thresholds characteristic is added. A v2 device is refused, not mis-decoded.
 //
 
 import CoreBluetooth
@@ -29,11 +37,13 @@ nonisolated enum GATT {
 
     /// Wire-contract version this client implements. Device Info byte 34 must
     /// match; a mismatch is reported to the user, never worked around (§9.3).
-    static let contractVersion: UInt8 = 2
+    /// v3 (thresholds-v3 §2.5) — a v2 unit gets the update-required state.
+    static let contractVersion: UInt8 = 3
 
     /// Flash log-record version this client implements. Device Info byte 35
-    /// carries the device's value; a change wipes the local cache (§2).
-    static let historyRecordVersion: UInt8 = 2
+    /// carries the device's value; a change wipes the local cache (§2). v3 keeps
+    /// the 26-byte layout but byte 22 becomes the packed class byte (§2.7).
+    static let historyRecordVersion: UInt8 = 3
 
     /// Advertised local name of a never-named unit — display-only fallback for
     /// the scan list when a peripheral advertises no local name (§2).
@@ -71,6 +81,10 @@ nonisolated enum GATT {
     /// Characteristic 5 — Device Info, READ, 40 bytes (§1.5).
     nonisolated(unsafe) static let deviceInfoCharacteristicUUID = CBUUID(string: "7A3E4F60-8C2D-4E9A-B1F6-0D3C5E7F9A2B")
 
+    /// Characteristic 6 — Thresholds, READ + WRITE, 60 bytes. New in contract v3
+    /// (thresholds-v3 §2.2); read once on connect, written whole on Save.
+    nonisolated(unsafe) static let thresholdsCharacteristicUUID = CBUUID(string: "7A3E4F61-8C2D-4E9A-B1F6-0D3C5E7F9A2B")
+
     /// Every characteristic the client discovers, in one place.
     nonisolated(unsafe) static let allCharacteristicUUIDs: [CBUUID] = [
         sensorCharacteristicUUID,
@@ -78,6 +92,7 @@ nonisolated enum GATT {
         settingsCharacteristicUUID,
         deviceNameCharacteristicUUID,
         deviceInfoCharacteristicUUID,
+        thresholdsCharacteristicUUID,
     ]
 
     /// Classifies a discovered characteristic without leaking CoreBluetooth
@@ -88,6 +103,7 @@ nonisolated enum GATT {
         case settings
         case deviceName
         case deviceInfo
+        case thresholds
         case unknown
 
         init(_ uuid: CBUUID) {
@@ -97,6 +113,7 @@ nonisolated enum GATT {
             case GATT.settingsCharacteristicUUID:   self = .settings
             case GATT.deviceNameCharacteristicUUID: self = .deviceName
             case GATT.deviceInfoCharacteristicUUID: self = .deviceInfo
+            case GATT.thresholdsCharacteristicUUID: self = .thresholds
             default:                                self = .unknown
             }
         }
@@ -105,24 +122,26 @@ nonisolated enum GATT {
     // MARK: - Command opcodes (§1.6)
 
     /// Command-characteristic opcodes. LOW/MED/HIGH/MAX map to 25/50/75/100%.
-    /// `0x01`–`0x0C` are unchanged from v1; `0x0A` is now labelled **Custom**
-    /// (VOC-index thresholds) and `0x0D`–`0x0F` are new in v2.
+    /// `0x0D`–`0x0F` are new in v2. In v3 `0x0A` (Custom) is **removed** —
+    /// firmware answers it with an ATT error, so it has no case here and can
+    /// never be sent — and `0x10` is new (thresholds-v3 §2.4).
     enum Command: UInt8 {
         case syncHistory  = 0x01  // Full history dump.
         case fanManual    = 0x02  // [pct: u8] — exact fan speed 0–100% (2-byte write).
-        case fanAuto      = 0x03  // aq_class-driven auto mode.
+        case fanAuto      = 0x03  // Gas/PM fan tables, worst wins.
         case fanOff       = 0x04  // Manual 0%.
         case fanLow       = 0x05  // Manual 25%.
         case fanMed       = 0x06  // Manual 50%.
         case fanHigh      = 0x07  // Manual 75%.
         case fanMax       = 0x08  // Manual 100%.
         case getStatus    = 0x09  // Force an immediate sensor notification (needs active CCCD).
-        case fanCustom    = 0x0A  // Custom mode — VOC-index setpoints from Settings (§1.3).
+        // 0x0A — retired (was Custom / VOC setpoints). Never sent.
         case setTime      = 0x0B  // SET_TIME [sec min hr wday mday mon yr2k] — raw decimal, not BCD.
         case syncRecent   = 0x0C  // SYNC_RECENT [count: u32 LE] — stream newest N records (5-byte write).
         case fanCleaning  = 0x0D  // SEN66 fan cleaning, no params (~12 s, PM pauses, re-arms warming).
         case co2Recal     = 0x0E  // Forced CO2 recalibration [ppm_ref: u16 LE].
         case clearErrors  = 0x0F  // Read-and-clear the SEN66 device status register.
+        case restoreThresholds = 0x10  // Thresholds blob → §2.2 defaults; Settings and name untouched.
     }
 
     /// ATT error returned by the device for an unknown opcode (§1.6).
@@ -150,7 +169,10 @@ nonisolated enum GATT {
     /// payload[0] of the retired v1 live packet — rejected (§1.1).
     static let legacyLivePacketMarker: UInt8 = 0x02
     /// payload[1] — the packet-format version carried inside a live packet.
-    static let livePayloadVersion: UInt8 = 0x02
+    /// Firmware packs `GEUE_CONTRACT_VERSION` here (the same macro as Device Info
+    /// byte 34), so it moves to 3 with the contract — firmware thresholds-v3 §5
+    /// lists byte 1 among the live bytes that change. A v2 packet is rejected.
+    static let livePayloadVersion: UInt8 = 0x03
 
     /// Byte offsets within the 52-byte live packet (§1.1). Named so the parser
     /// never carries a bare integer that could drift from the contract.
@@ -172,9 +194,9 @@ nonisolated enum GATT {
         static let nc25           = 26
         static let nc4            = 28
         static let nc10           = 30
-        static let aqClass        = 32  // u8 0–5
+        static let classByte      = 32  // u8 packed: low nibble gas 0–5, high nibble PM 0–3
         static let fanPercent     = 33  // u8
-        static let fanMode        = 34  // u8 0 Auto / 1 Custom / 2 Manual
+        static let fanMode        = 34  // u8 0 Auto / 2 Manual (1 retired, never sent)
         static let status         = 35  // u8 bitfield
         static let sen66Status    = 36  // u32 device status register
         static let rawVOCTicks    = 40  // u16
@@ -188,14 +210,16 @@ nonisolated enum GATT {
 
     // MARK: - Settings payload layout (§1.3) — 12 bytes
 
-    /// Settings characteristic length: 4 × u16 thresholds + brightness + fan
-    /// mode + fan manual % + 1 reserved byte. The client always writes 12 bytes.
+    /// Settings characteristic length: 8 retired bytes + brightness + fan mode +
+    /// fan manual % + 1 reserved byte. The client always writes 12 bytes; the
+    /// 8-byte legacy form is rejected by v3 firmware (thresholds-v3 §2.3).
     static let settingsPayloadLength = 12
 
     enum SettingsOffset {
-        static let thresholds    = 0   // 4 × u16 LE (lo, med, hi, max)
+        static let retired       = 0   // 8 bytes, were VOC lo/med/hi/max — READ 0, always written 0
+        static let retiredLength = 8
         static let ledBrightness = 8   // u8 5–100
-        static let fanMode       = 9   // u8 0/1/2
+        static let fanMode       = 9   // u8 0 Auto / 2 Manual — 1 is rejected by firmware
         static let fanManualPct  = 10  // u8 0–100
         static let reserved      = 11
     }
@@ -206,9 +230,49 @@ nonisolated enum GATT {
     static let ledBrightnessMax: UInt8 = 100
     static let ledBrightnessDefault: UInt8 = 50
 
-    /// VOC-index threshold bounds (§1.3). The index scale itself is 1–500.
-    static let vocIndexMin: UInt16 = 1
-    static let vocIndexMax: UInt16 = 500
+    // MARK: - Thresholds payload layout (thresholds-v3 §2.2) — 60 bytes
+
+    /// READ always returns exactly 60 bytes; a WRITE of any other length is
+    /// rejected with `BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN`.
+    static let thresholdsPayloadLength = 60
+
+    /// Byte 0 of the blob. Firmware rejects any other value.
+    static let thresholdsVersion: UInt8 = 1
+
+    /// Byte offsets within the 60-byte Thresholds blob. All multi-byte fields are
+    /// little-endian; PM edges and PM hysteresis are µg/m³ ×10 on the wire.
+    enum ThresholdsOffset {
+        static let version          = 0   // u8, must be 1
+        static let reserved1        = 1   // u8, write 0, ignore on read
+        static let vocEdges         = 2   // 4 × u16 C1..C4, VOC index
+        static let noxEdges         = 10  // 4 × u16 C1..C4, NOx index
+        static let co2Edges         = 18  // 4 × u16 C1..C4, ppm
+        static let pm1Attention     = 26  // u16 ×10
+        static let pm1Hazard        = 28
+        static let pm25Attention    = 30
+        static let pm25Hazard       = 32
+        static let pm10Attention    = 34
+        static let pm10Hazard       = 36
+        static let fanGas           = 38  // 5 × u8, % for gas class 1..5
+        static let fanPM            = 43  // 3 × u8, % for PM class 1..3
+        static let fanDownDelay     = 46  // u16 seconds
+        static let ionizerRunOn     = 48  // u16 minutes
+        static let hysteresisVOC    = 50  // u16 VOC index
+        static let hysteresisNOx    = 52  // u16 NOx index
+        static let hysteresisCO2    = 54  // u16 ppm
+        static let hysteresisPM     = 56  // u16 ×10
+        static let reserved58       = 58  // u16, write 0, ignore on read
+    }
+
+    /// Upper bounds firmware enforces on a Thresholds write (§2.2). There are no
+    /// lower bounds beyond "strictly increasing" / "below hazard" — C1 may be 0 —
+    /// so the app enforces none either: it must accept every blob firmware does.
+    static let thresholdsVOCEdgeMax: UInt16 = 500
+    static let thresholdsNOxEdgeMax: UInt16 = 500
+    static let thresholdsCO2EdgeMax: UInt16 = 40_000
+    static let thresholdsFanPercentMax: UInt8 = 100
+    static let thresholdsFanDownDelayMaxSeconds: UInt16 = 3_600
+    static let thresholdsIonizerRunOnMaxMinutes: UInt16 = 1_440
 
     // MARK: - Device Name (§1.4)
 
@@ -233,7 +297,7 @@ nonisolated enum GATT {
     // MARK: - History packet demux (shares the Sensor characteristic) (§1.2)
     //
     // Live sensor notifications keep firing during a history stream, on the SAME
-    // characteristic — demux on payload[0]: 0x03 = live v2, 0xA5 = history.
+    // characteristic — demux on payload[0]: 0x03 = live, 0xA5 = history.
     // A v2 history packet is 34 bytes: 0xA5, 0x48 ('H'), u24 total, u24 index,
     // and a 26-byte log record v2. 31-byte v1 packets are rejected on length.
 
@@ -259,6 +323,7 @@ nonisolated enum GATT {
 
     /// Byte offsets within the 26-byte log record, relative to the record start.
     /// Number concentrations and raw values are **not** logged (firmware §6.3).
+    /// Record v3 has the same layout as v2; only byte 22's meaning changed.
     enum HistoryRecordOffset {
         static let timestamp   = 0   // u32 Unix epoch seconds
         static let temperature = 4   // i16 ×100 °C
@@ -270,7 +335,7 @@ nonisolated enum GATT {
         static let pm25        = 16
         static let pm4         = 18
         static let pm10        = 20
-        static let aqClass     = 22  // u8
+        static let classByte   = 22  // u8 packed, same rule as live byte 32
         static let status      = 23  // u8
         static let sequence    = 24  // u16
     }

@@ -2,16 +2,16 @@
 //  SensorParserTests.swift
 //  G2-iOSTests
 //
-//  Golden-vector tests for the 52-byte live packet (§7). Each expectation is
-//  stated in display units, so a scaling regression (÷10 vs ÷100) fails loudly
-//  rather than shifting a decimal point unnoticed.
+//  Golden-vector tests for the 52-byte live packet (§7), contract v3. Each
+//  expectation is stated in display units, so a scaling regression (÷10 vs
+//  ÷100) fails loudly rather than shifting a decimal point unnoticed.
 //
 
 import Foundation
 import Testing
 @testable import G2_iOS
 
-@Suite("SensorParser — live packet v2")
+@Suite("SensorParser — live packet v3")
 struct SensorParserTests {
 
     private func parsed(_ bytes: [UInt8]) throws -> SensorReading {
@@ -49,9 +49,9 @@ struct SensorParserTests {
         #expect(r.nc4.value == 4.2)
         #expect(r.nc10.value == 3.3)
 
-        #expect(r.aqClass == .moderate)
+        #expect(r.classes == AirClasses(gas: 3, pm: 2))
         #expect(r.fanSpeedPct == 75)
-        #expect(r.fanMode == .custom)
+        #expect(r.fanMode == .manual)
         #expect(r.deviceState == .enabled)
 
         // Raw values: ticks and ppm unscaled, RH ×100 and T ×200 descaled.
@@ -62,7 +62,7 @@ struct SensorParserTests {
         #expect(r.rawTemperatureC.value == 24.65)
     }
 
-    @Test("Status byte 0x4B decodes to the v2 bit map")
+    @Test("Status byte 0x4B decodes to the v2 bit map (unchanged in v3)")
     func statusBitsDecode() throws {
         let r = try parsed(GoldenVectors.validLivePacket)
         #expect(r.status.sen66Present)          // bit 0
@@ -138,24 +138,90 @@ struct SensorParserTests {
         #expect(GATT.decodeU16x10(0xFFFF) == nil)
     }
 
+    // MARK: - Packed class byte (thresholds-v3 §1.1)
+
+    @Test("Byte 32 splits into gas (low nibble) and PM (high nibble)")
+    func packedClassByteDecodes() throws {
+        let r = try parsed(GoldenVectors.validLivePacket)   // 0x23
+        #expect(r.classes.gas == 3)
+        #expect(r.classes.pm == 2)
+        #expect(r.gasLevel == .moderate)
+        #expect(r.pmLevel == .attention)
+        #expect(r.gasClassLabel == "Moderate")
+        #expect(r.pmClassLabel == "Attention")
+    }
+
+    @Test("Gas and PM classes decode independently at byte 32", arguments: [
+        (UInt8(0x00), UInt8(0), UInt8(0)),
+        (0x01, 1, 0), (0x05, 5, 0),          // gas moves, PM stays unknown
+        (0x10, 0, 1), (0x30, 0, 3),          // PM moves, gas stays unknown
+        (0x15, 5, 1), (0x31, 1, 3), (0x34, 4, 3),
+    ])
+    func classNibblesAreIndependent(byte: UInt8, gas: UInt8, pm: UInt8) throws {
+        var bytes = GoldenVectors.validLivePacket
+        bytes[GATT.SensorOffset.classByte] = byte
+        let r = try parsed(bytes)
+        #expect(r.classes.gas == gas)
+        #expect(r.classes.pm == pm)
+        // Nothing else in the packet moves with the class byte.
+        #expect(r.vocIndex.value == 123.4)
+        #expect(r.pm25.value == 9.8)
+    }
+
+    @Test("PM over-range packet carries gas 3 with an unknown PM class")
+    func pmInvalidMeansPMClassZero() throws {
+        let r = try parsed(GoldenVectors.pmOverRangeLivePacket)   // 0x03
+        #expect(r.classes == AirClasses(gas: 3, pm: 0))
+        #expect(r.pmLevel == .unknown)
+        #expect(r.pmClassLabel == "—")
+    }
+
+    @Test("Out-of-range nibbles are clamped to unknown, never to a real class")
+    func outOfRangeNibblesAreUnknown() throws {
+        var bytes = GoldenVectors.validLivePacket
+        bytes[GATT.SensorOffset.classByte] = 0xF6   // gas 6, PM 15 — both undefined
+        let r = try parsed(bytes)
+        #expect(r.classes.gas == 6)
+        #expect(r.classes.pm == 15)
+        #expect(r.gasLevel == .unknown)
+        #expect(r.pmLevel == .unknown)
+    }
+
+    // MARK: - Fan mode byte 34 (thresholds-v3 §2.6)
+
+    @Test("Byte 34 decodes 0 Auto and 2 Manual")
+    func fanModeByte34() throws {
+        var bytes = GoldenVectors.validLivePacket
+        bytes[GATT.SensorOffset.fanMode] = 0
+        #expect(try parsed(bytes).fanMode == .auto)
+        bytes[GATT.SensorOffset.fanMode] = 2
+        #expect(try parsed(bytes).fanMode == .manual)
+        bytes[GATT.SensorOffset.fanMode] = 3
+        #expect(try parsed(bytes).fanMode == nil)   // undefined, not coerced
+    }
+
     // MARK: - Warming state (§2)
 
-    @Test("Warming packet: aq_class 0 with status bit 2 reads as Warming up")
+    @Test("Warming packet: class byte 0 with status bit 2 reads as Warming up on both tiles")
     func warmingState() throws {
         let r = try parsed(GoldenVectors.warmingLivePacket)
         #expect(r.status.sen66Warming)
-        #expect(r.aqClass == .unknown)
-        #expect(!r.aqClass.isValid)
+        #expect(r.classes == .unknown)
+        #expect(r.gasLevel == .unknown)
+        #expect(!r.gasLevel.isValid)
+        #expect(!r.pmLevel.isValid)
         #expect(r.isWarmingUp)
-        #expect(r.aqClassLabel == "Warming up")
+        #expect(r.gasClassLabel == "Warming up")
+        #expect(r.pmClassLabel == "Warming up")
     }
 
-    @Test("aq_class 0 without the warming bit reads as — , not Warming up")
+    @Test("Class byte 0 without the warming bit reads as — , not Warming up")
     func unknownWithoutWarmingBit() throws {
         let r = try parsed(GoldenVectors.allSentinelLivePacket)   // status 0x00
         #expect(!r.status.sen66Warming)
-        #expect(r.aqClass == .unknown)
-        #expect(r.aqClassLabel == "—")
+        #expect(r.gasLevel == .unknown)
+        #expect(r.gasClassLabel == "—")
+        #expect(r.pmClassLabel == "—")
     }
 
     // MARK: - Rejections
@@ -189,11 +255,20 @@ struct SensorParserTests {
         #expect(SensorParser.parse(GoldenVectors.data(bytes)) == .failure(.unsupportedMarker(0xA5)))
     }
 
+    @Test("A contract-v2 packet (payload version 2) is rejected, not read as packed classes")
+    func contractV2PacketRejected() {
+        // Byte 32 of a v2 packet is aq_class with PM folded in; decoding it as a
+        // packed byte would invent a gas class. Byte 1 is what tells them apart.
+        #expect(GATT.livePayloadVersion == 0x03)
+        #expect(SensorParser.parse(GoldenVectors.data(GoldenVectors.contractV2LivePacket))
+                == .failure(.unsupportedPayloadVersion(0x02)))
+    }
+
     @Test("An unexpected payload version is rejected rather than mis-decoded")
     func payloadVersionRejected() {
         var bytes = GoldenVectors.validLivePacket
-        bytes[1] = 0x03
-        #expect(SensorParser.parse(GoldenVectors.data(bytes)) == .failure(.unsupportedPayloadVersion(0x03)))
+        bytes[1] = 0x04
+        #expect(SensorParser.parse(GoldenVectors.data(bytes)) == .failure(.unsupportedPayloadVersion(0x04)))
     }
 
     @Test("Short payloads fail without crashing", arguments: [0, 1, 31, 51])

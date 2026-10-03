@@ -10,8 +10,8 @@
 //  commands, so a write only happens when the selection differs from the last
 //  mode the device reported.
 //
-//  "TVOC Auto" is now **Custom** — same opcode (0x0A), but its thresholds are a
-//  VOC index rather than ppb (§1.3).
+//  v3 note: the picker is Auto / Manual. Custom (opcode 0x0A) is retired — the
+//  gas fan table in Settings → Air quality thresholds replaced it.
 //
 
 import SwiftUI
@@ -75,19 +75,14 @@ struct ConditioningView: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Theme.aqiModerate)
             Text("Fan is set to Manual / Off and will stay off at the next start. "
-                 + "Switch to Auto or Custom to restore automatic control.")
+                 + "Switch to Auto to restore automatic control.")
                 .font(.footnote)
                 .foregroundStyle(Theme.textPrimary)
-            HStack(spacing: 10) {
-                Button("Switch to Auto") { mode = .auto }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.accent)
-                Button("Switch to Custom") { mode = .custom }
-                    .buttonStyle(.bordered)
-                    .tint(Theme.accent)
-            }
-            .font(.subheadline.weight(.semibold))
-            .padding(.top, 2)
+            Button("Switch to Auto") { mode = .auto }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .font(.subheadline.weight(.semibold))
+                .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(Theme.spacing)
@@ -271,16 +266,15 @@ struct ConditioningView: View {
         .card()
     }
 
-    // MARK: - Auto modes
+    // MARK: - Auto mode
 
     private var autoModeNote: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label(mode.note, systemImage: "wand.and.stars")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Theme.textPrimary)
-            Text(mode == .auto
-                 ? "The monitor adjusts the fan automatically from its air-quality class."
-                 : "The monitor adjusts the fan using the VOC index thresholds. Edit them in Settings.")
+            Text("The monitor runs the fan at the higher of its gas-class and PM-class speeds. "
+                 + "Edit them in Settings → Air quality thresholds.")
                 .font(.footnote)
                 .foregroundStyle(Theme.textSecondary)
         }
@@ -319,7 +313,6 @@ struct ConditioningView: View {
     private func applyMode(_ newMode: FanMode) {
         switch newMode {
         case .auto:   bluetooth.setFanAuto()
-        case .custom: bluetooth.setFanCustom()
         case .manual:
             // Manual has no mode opcode — the device enters it by being given a
             // speed. Send the one already on screen so nothing jumps (§5).

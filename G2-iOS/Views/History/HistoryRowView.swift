@@ -3,7 +3,9 @@
 //  G2-iOS
 //
 //  Compact summary row for one history record (§4.2): timestamp, key values, and
-//  an AQI color dot. Sentinel fields render as "—".
+//  two class dots — gas and PM, coloured like the device's two LEDs
+//  (thresholds-v3 §1.1). A record logged before contract v3 has no PM class and
+//  shows a grey PM dot. Sentinel fields render as "—".
 //
 
 import SwiftUI
@@ -13,10 +15,16 @@ struct HistoryRowView: View {
 
     var body: some View {
         HStack(spacing: Theme.spacing) {
-            Circle()
-                .fill(record.aqiLevel.color)
-                .frame(width: 10, height: 10)
-                .accessibilityLabel("Air quality \(record.aqClassLabel)")
+            VStack(spacing: 4) {
+                Circle()
+                    .fill(record.aqiLevel.color)
+                    .frame(width: 10, height: 10)
+                Circle()
+                    .fill(record.pmLevel.color)
+                    .frame(width: 10, height: 10)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Gas \(record.aqClassLabel), particulate \(record.pmClassLabel)")
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(record.timestamp, format: .dateTime.month().day().hour().minute())

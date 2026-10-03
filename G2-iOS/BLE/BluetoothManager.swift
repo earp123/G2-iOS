@@ -53,18 +53,25 @@ final class BluetoothManager: NSObject {
     private(set) var liveRSSI: Int?
     private(set) var mtu: Int?
 
-    /// Convenience accessor for the VOC-index thresholds inside `settings`.
-    var thresholds: VOCThresholds? { settings?.thresholds }
+    /// What the device last reported from the 60-byte Thresholds characteristic
+    /// (thresholds-v3 §2.2). Read on connect, and re-read after every Save and
+    /// every Restore defaults, so it is always the device's own stored copy —
+    /// never an optimistic local echo. `nil` while disconnected, so a reconnect
+    /// always reloads from the device.
+    private(set) var thresholds: ThresholdsBlob?
+    /// Bumped on every completed Thresholds read, even one that returns the same
+    /// bytes, so the editor can refresh after Restore defaults on a unit that was
+    /// already at its defaults.
+    private(set) var thresholdsRevision = 0
+    /// True from a Thresholds write (or `0x10`) until its result and the re-read
+    /// that follows it are in — the editor holds Save while it is set.
+    private(set) var isWritingThresholds = false
 
     /// Set when Device Info reports a contract or log-record version this build
-    /// does not implement. Live packets are then refused rather than decoded —
-    /// the firmware handoff note's "cheapest guard against a v1 device meeting a
-    /// v2 app" (notes §7 / §9.3).
-    ///
-    /// An all-zero Device Info means the unit booted with no SEN66 attached
-    /// (notes §7), not a version mismatch, so it does not trip this guard — such
-    /// a unit still speaks v2, it just has nothing to report. That reading is the
-    /// only one consistent with both statements in the note.
+    /// does not implement (`DeviceInfo.requiresUpdate`). Live packets are then
+    /// refused rather than decoded — the firmware handoff note's "cheapest guard
+    /// against an old device meeting a new app" (notes §7 / §9.3). A v2 unit
+    /// (2 / 2) lands here on a v3 build.
     private(set) var unsupportedContract: DeviceInfo?
 
     /// True when the device says no SEN66 is attached (status bit 0 clear). Every
@@ -110,6 +117,15 @@ final class BluetoothManager: NSObject {
     @ObservationIgnored private var settingsChar: CBCharacteristic?
     @ObservationIgnored private var deviceNameChar: CBCharacteristic?
     @ObservationIgnored private var deviceInfoChar: CBCharacteristic?
+    @ObservationIgnored private var thresholdsChar: CBCharacteristic?
+    /// Set while a `0x10` write-with-response is in flight; its success triggers
+    /// the Thresholds re-read (§3).
+    @ObservationIgnored private var awaitingThresholdsRestore = false
+    /// A Settings READ that arrived before Device Info had cleared the contract
+    /// guard. It is decoded only once the guard passes: a v2 unit's byte 9 can
+    /// still hold the retired Custom value 1, and an incompatible unit's
+    /// Settings are not parsed at all (gatt-v3 notes §1).
+    @ObservationIgnored private var pendingSettingsData: Data?
 
     @ObservationIgnored private var scanWatchdog: Task<Void, Never>?
     @ObservationIgnored private var connectWatchdog: Task<Void, Never>?
@@ -137,6 +153,9 @@ final class BluetoothManager: NSObject {
     @ObservationIgnored private var simFanSpeed: Int = 25
     @ObservationIgnored private var simSettings: DeviceSettings = .defaults
     @ObservationIgnored private var simDeviceName: String = GATT.advertisedName
+    /// The synthetic unit's Thresholds blob — written by Save, reset by `0x10`,
+    /// and used to classify the synthetic readings, like the firmware would.
+    @ObservationIgnored private var simThresholds: ThresholdsBlob = .defaults
     /// Synthetic SEN66 device status register (bytes 36–39), cleared by the
     /// maintenance commands so their effect is visible in the Simulator.
     @ObservationIgnored private var simSen66Status: UInt32 = 0
@@ -260,6 +279,9 @@ final class BluetoothManager: NSObject {
         settingsChar = nil
         deviceNameChar = nil
         deviceInfoChar = nil
+        thresholdsChar = nil
+        awaitingThresholdsRestore = false
+        pendingSettingsData = nil
 
         phase = .disconnected
         connectedDevice = nil
@@ -268,6 +290,8 @@ final class BluetoothManager: NSObject {
         settings = nil
         deviceName = nil
         deviceInfo = nil
+        thresholds = nil
+        isWritingThresholds = false
         unsupportedContract = nil
         liveRSSI = nil
         mtu = nil
@@ -292,23 +316,26 @@ final class BluetoothManager: NSObject {
     }
 
     /// Raw multi-byte write to the Command characteristic (SET_TIME, SYNC_RECENT).
-    /// No-op in the Simulator, which has no radio.
-    private func writeToCommand(_ payload: Data) {
+    /// No-op in the Simulator, which has no radio. Returns whether the write
+    /// expects a response — `nil` when nothing was written.
+    @discardableResult
+    private func writeToCommand(_ payload: Data) -> Bool? {
         #if targetEnvironment(simulator)
         _ = payload
+        return nil
         #else
         guard phase == .connected, let p = connectedPeripheral, let c = commandChar else {
             commandFeedback = .rejected("Not connected")
-            return
+            return nil
         }
         let type: CBCharacteristicWriteType = c.properties.contains(.write) ? .withResponse : .withoutResponse
         p.writeValue(payload, for: c, type: type)
         if type == .withResponse { startWriteWatchdog() }
+        return type == .withResponse
         #endif
     }
 
     func setFanAuto()   { sendCommand(.fanAuto) }
-    func setFanCustom() { sendCommand(.fanCustom) }      // 0x0A — VOC-index setpoints (§1.3)
     func setFanPreset(_ preset: FanPreset) { sendCommand(preset.command) }
     func refreshNow()   { sendCommand(.getStatus) }      // 0x09 (§1.6 / §5)
 
@@ -391,17 +418,13 @@ final class BluetoothManager: NSObject {
         #endif
     }
 
-    /// Validates the thresholds client-side, then writes the full 12-byte payload
-    /// (§1.3). Returns false (without writing) if the thresholds are invalid.
+    /// Writes the full 12-byte Settings payload, bytes 0–7 zero (thresholds-v3
+    /// §2.3). There is nothing left to pre-validate: brightness and the manual %
+    /// are clamped by `DeviceSettings`, and `FanMode` cannot encode the retired 1.
     @discardableResult
     func writeSettings(_ newSettings: DeviceSettings) -> Bool {
-        guard newSettings.thresholds.isMonotonic else {
-            commandFeedback = .rejected("Thresholds must be strictly increasing (lo < med < hi < max).")
-            return false
-        }
-        guard newSettings.thresholds.isInRange else {
-            commandFeedback = .rejected(
-                "Thresholds must be between \(GATT.vocIndexMin) and \(GATT.vocIndexMax) on the VOC index scale.")
+        guard unsupportedContract == nil else {
+            commandFeedback = .rejected(Self.updateRequiredMessage)
             return false
         }
         #if targetEnvironment(simulator)
@@ -431,12 +454,69 @@ final class BluetoothManager: NSObject {
         return writeSettings(updated)
     }
 
-    /// Writes only the VOC-index thresholds, preserving every other field (§6).
+    // MARK: - Thresholds (thresholds-v3 §2.2 / §3)
+
+    func readThresholds() {
+        #if targetEnvironment(simulator)
+        handleValueUpdate(.thresholds, data: simThresholds.pack(), error: nil)
+        #else
+        guard phase == .connected, let p = connectedPeripheral, let c = thresholdsChar else { return }
+        p.readValue(for: c)
+        #endif
+    }
+
+    /// Writes the whole 60-byte blob. Runs the firmware's own rules first and
+    /// writes nothing if any fails, so the user is told which field is wrong
+    /// instead of getting a bare ATT error (§1.2). On success the characteristic
+    /// is re-read, so the editor shows what the device actually stored.
     @discardableResult
-    func writeThresholds(_ thresholds: VOCThresholds) -> Bool {
-        var updated = settings ?? .defaults
-        updated.thresholds = thresholds
-        return writeSettings(updated)
+    func writeThresholds(_ blob: ThresholdsBlob) -> Bool {
+        guard unsupportedContract == nil else {
+            commandFeedback = .rejected(Self.updateRequiredMessage)
+            return false
+        }
+        if let problem = blob.validate() {
+            commandFeedback = .rejected(problem.message)
+            return false
+        }
+        #if targetEnvironment(simulator)
+        simThresholds = blob
+        readThresholds()
+        commandFeedback = .succeeded("Thresholds saved.")
+        return true
+        #else
+        guard phase == .connected, let p = connectedPeripheral, let c = thresholdsChar else {
+            commandFeedback = .rejected("Not connected")
+            return false
+        }
+        isWritingThresholds = true
+        p.writeValue(blob.pack(), for: c, type: .withResponse)
+        startWriteWatchdog()
+        return true
+        #endif
+    }
+
+    /// Opcode `0x10` — the device puts its Thresholds blob back to the §2.2
+    /// defaults (Settings and the nickname are untouched), then the
+    /// characteristic is re-read so the editor shows the restored values.
+    func restoreThresholdDefaults() {
+        guard unsupportedContract == nil else {
+            commandFeedback = .rejected(Self.updateRequiredMessage)
+            return
+        }
+        #if targetEnvironment(simulator)
+        simulateCommand(.restoreThresholds, parameter: nil)
+        #else
+        guard let awaitsResponse = writeToCommand(Data([GATT.Command.restoreThresholds.rawValue])) else { return }
+        if awaitsResponse {
+            isWritingThresholds = true
+            awaitingThresholdsRestore = true   // re-read once the write is acknowledged
+        } else {
+            // No acknowledgement to wait for. ATT requests are serialised on the
+            // link, so this read is answered after the command has been applied.
+            readThresholds()
+        }
+        #endif
     }
 
     func readDeviceName() {
@@ -498,20 +578,24 @@ final class BluetoothManager: NSObject {
     }
 
     /// Refuses a device whose reported contract or log-record version this build
-    /// does not implement (notes §7). A zeroed Device Info is "no SEN66 at boot",
-    /// not a mismatch, and is allowed through.
+    /// does not implement — `DeviceInfo.requiresUpdate`, which needs exactly
+    /// 3 / 3 (gatt-v3 notes §1).
     private func applyContractGuard(_ info: DeviceInfo) {
-        let bootedWithoutSensor = info.contractVersion == 0 && info.logRecordVersion == 0
-        let mismatched = info.contractVersion != GATT.contractVersion
-            || info.logRecordVersion != GATT.historyRecordVersion
-        if bootedWithoutSensor || !mismatched {
+        guard info.requiresUpdate else {
             unsupportedContract = nil
             return
         }
         unsupportedContract = info
         latestReading = nil          // nothing already on screen stays trustworthy
         lastParseError = nil
+        settings = nil               // decoded under another contract — not shown
+        thresholds = nil
+        isWritingThresholds = false
     }
+
+    /// Shown when a write is attempted on a unit the contract guard refused.
+    private static let updateRequiredMessage =
+        "This monitor needs a firmware update before its settings can be changed."
 
     func readDeviceInfo() {
         #if targetEnvironment(simulator)
@@ -528,6 +612,12 @@ final class BluetoothManager: NSObject {
             try? await Task.sleep(for: Self.writeTimeout)
             guard let self, !Task.isCancelled else { return }
             self.commandFeedback = .timedOut   // never spin forever on a pending write (§7)
+            // Release the editor's Save, and show whatever the device now holds.
+            if self.isWritingThresholds {
+                self.awaitingThresholdsRestore = false
+                self.isWritingThresholds = false
+                self.readThresholds()
+            }
         }
     }
 
@@ -612,6 +702,7 @@ final class BluetoothManager: NSObject {
             case .settings:   settingsChar = c
             case .deviceName: deviceNameChar = c
             case .deviceInfo: deviceInfoChar = c
+            case .thresholds: thresholdsChar = c
             case .unknown:    break
             }
         }
@@ -623,13 +714,15 @@ final class BluetoothManager: NSObject {
         p.setNotifyValue(true, for: sensor)
         if sensor.properties.contains(.read) { p.readValue(for: sensor) }
 
-        // Settings, Device Name and Device Info are read once after discovery (§2).
-        // The reads are issued directly rather than through the public accessors,
-        // which gate on `phase == .connected` — that transition happens later, on
-        // the CCCD callback.
+        // Settings, Device Name, Device Info and Thresholds are read once after
+        // discovery (§2 / thresholds-v3 §2 item 5). The reads are issued directly
+        // rather than through the public accessors, which gate on
+        // `phase == .connected` — that transition happens later, on the CCCD
+        // callback. A v2 unit has no Thresholds characteristic, so nothing is read.
         if let c = settingsChar   { p.readValue(for: c) }
         if let c = deviceNameChar { p.readValue(for: c) }
         if let c = deviceInfoChar { p.readValue(for: c) }
+        if let c = thresholdsChar { p.readValue(for: c) }
     }
 
     private func handleNotificationStateChanged(_ kind: GATT.Characteristic, isNotifying: Bool, error: String?) {
@@ -661,7 +754,14 @@ final class BluetoothManager: NSObject {
                 lastParseError = err.message   // non-fatal (§7)
             }
         case .settings:
-            guard let data, let parsed = DeviceSettings(data: data) else { return }
+            guard let data else { return }
+            // Decoded only after Device Info has cleared the contract guard; a
+            // READ that lands first waits for it (see `pendingSettingsData`).
+            guard deviceInfo != nil else {
+                pendingSettingsData = data
+                return
+            }
+            guard unsupportedContract == nil, let parsed = DeviceSettings(data: data) else { return }
             settings = parsed
         case .deviceName:
             guard let data else { return }
@@ -675,13 +775,26 @@ final class BluetoothManager: NSObject {
             guard let data, let parsed = DeviceInfo(data: data) else { return }
             deviceInfo = parsed
             applyContractGuard(parsed)
+            if let pending = pendingSettingsData {
+                pendingSettingsData = nil
+                handleValueUpdate(.settings, data: pending, error: nil)
+            }
+        case .thresholds:
+            // The read that closes a Save or a Restore defaults (or the one on
+            // connect). Taken as-is — not validated — so the editor shows exactly
+            // what the device holds (§3).
+            isWritingThresholds = false
+            guard unsupportedContract == nil, let data, let parsed = ThresholdsBlob.unpack(data) else { return }
+            thresholds = parsed
+            thresholdsRevision &+= 1
         default:
             break
         }
     }
 
     private func handleHistoryPacket(_ data: Data) {
-        guard let packet = HistoryPacketParser.parse(data) else { return }
+        // History from a unit on another contract is refused like its live data.
+        guard unsupportedContract == nil, let packet = HistoryPacketParser.parse(data) else { return }
         lastHistoryActivity = Date()   // progress — keep the inactivity watchdog at bay
         switch packet {
         case .record(let fields, let index, let total):
@@ -696,18 +809,42 @@ final class BluetoothManager: NSObject {
 
     private func handleWriteResult(_ kind: GATT.Characteristic, error: String?, attCode: Int?) {
         writeWatchdog?.cancel()
-        guard let error else { return }   // success
+        let closesRestore = kind == .command && awaitingThresholdsRestore
+        if closesRestore { awaitingThresholdsRestore = false }
+
+        guard let error else {
+            // Success. A Thresholds write or a `0x10` is followed by a re-read, so
+            // the editor shows what the device actually stored (§3).
+            if kind == .thresholds {
+                commandFeedback = .succeeded("Thresholds saved.")
+                readThresholds()
+            } else if closesRestore {
+                commandFeedback = .succeeded("Thresholds restored to defaults.")
+                readThresholds()
+            }
+            return
+        }
+        // Firmware answers a rejected Thresholds or Settings write with ATT 0x0E
+        // (`BLE_ATT_ERR_UNLIKELY`) too, so the opcode message is reserved for the
+        // Command characteristic; every other kind gets its own message and re-read.
         switch kind {
-        case _ where attCode == Int(GATT.attErrorUnknownOpcode):
+        case .command where attCode == Int(GATT.attErrorUnknownOpcode):
             commandFeedback = .rejected("Command rejected by device (unknown opcode 0x0E).")
+            if closesRestore { readThresholds() }
         case .settings:
             commandFeedback = .rejected("Settings rejected by device: \(error)")
             readSettings()      // re-read so the editor reflects what the device kept
         case .deviceName:
             commandFeedback = .rejected("Name rejected by device: \(error)")
             readDeviceName()
+        case .thresholds:
+            // Not expected — `validate()` mirrors every firmware rule — but if it
+            // happens nothing was applied; re-read to show what the device kept.
+            commandFeedback = .rejected("Thresholds rejected by device: \(error)")
+            readThresholds()
         default:
             commandFeedback = .rejected("Command rejected: \(error)")
+            if closesRestore { readThresholds() }
         }
     }
 
@@ -741,7 +878,9 @@ final class BluetoothManager: NSObject {
 // MARK: - HistorySyncTransport (§4)
 
 extension BluetoothManager: HistorySyncTransport {
-    var isConnected: Bool { phase == .connected }
+    /// A unit the contract guard refused is not offered for history sync, so its
+    /// records are never parsed and the cache is never wiped on its account.
+    var isConnected: Bool { phase == .connected && unsupportedContract == nil }
 
     /// Short per-device cache key: the last two bytes of the peripheral's
     /// Bluetooth identifier (iOS hides the raw MAC; CoreBluetooth's stable UUID
@@ -907,10 +1046,13 @@ extension BluetoothManager: CBPeripheralDelegate {
 // MARK: - Simulation (Simulator only)
 //
 // Synthetic transport used because the iOS Simulator has no Bluetooth radio.
-// Readings are built into real 52-byte contract-v2 packets and history into real
+// Readings are built into real 52-byte contract-v3 packets and history into real
 // 34-byte packets, then decoded by the production SensorParser and
 // HistoryPacketParser — so this exercises the same wire path as live hardware
-// (§2). Compiled only for the Simulator; never present in device builds.
+// (§2). The Thresholds blob round-trips through the real pack/unpack, and the
+// synthetic unit classifies its readings against it the way firmware does, so
+// editing an edge visibly moves a tile. Compiled only for the Simulator; never
+// present in device builds.
 
 #if targetEnvironment(simulator)
 extension BluetoothManager {
@@ -932,7 +1074,7 @@ extension BluetoothManager {
     )
 
     /// Ticks the synthetic unit spends warming up after connecting, so the
-    /// "Warming up" treatment (status bit 2, aq_class 0) is exercisable (§2).
+    /// "Warming up" treatment (status bit 2, class byte 0) is exercisable (§2).
     private static let simWarmupTicks: UInt16 = 4
 
     /// Test hook: skip the scan and land directly in a connected session.
@@ -981,6 +1123,7 @@ extension BluetoothManager {
             self.settings = self.simSettings
             self.deviceName = self.simDeviceName
             self.deviceInfo = Self.simDeviceInfo
+            self.readThresholds()
             self.liveRSSI = self.connectedDevice?.rssi ?? -50
             self.mtu = 185
             self.startSimulatedReadings()
@@ -1012,9 +1155,10 @@ extension BluetoothManager {
         case .fanAuto:
             simSettings.fanMode = .auto
             simFanSpeed = 50        // pretend the controller settled here
-        case .fanCustom:
-            simSettings.fanMode = .custom
-            simFanSpeed = 50
+        case .restoreThresholds:
+            simThresholds = .defaults
+            readThresholds()
+            commandFeedback = .succeeded("Thresholds restored to defaults.")
         case .getStatus: break      // forces an immediate emit below
         case .fanCleaning, .clearErrors, .co2Recal:
             simSen66Status = 0      // maintenance clears the synthetic fault register
@@ -1061,8 +1205,11 @@ extension BluetoothManager {
         status |= 0x40                      // bit6 ionizer powered
         if Double.random(in: 0...1) < 0.03 { status |= 0x20 }    // bit5 ionizer fault
 
-        let aqClass: UInt8 = warming ? 0
-            : vocIndex <= 100 ? 1 : vocIndex <= 150 ? 2 : vocIndex <= 250 ? 3 : vocIndex <= 350 ? 4 : 5
+        let pmValid = !warming && !injectSentinel
+        let classes = warming ? AirClasses.unknown : Self.simClasses(
+            vocIndex: vocIndex, noxIndex: noxIndex, co2: co2,
+            pm1: pmValid ? pm1 : nil, pm25: pmValid ? pm25 : nil, pm10: pmValid ? pm10 : nil,
+            thresholds: simThresholds)
 
         let packet = Self.makeSimPacket(
             sequence: simSequence,
@@ -1075,7 +1222,7 @@ extension BluetoothManager {
             pm25: warming || injectSentinel ? nil : pm25,
             pm4:  warming || injectSentinel ? nil : pm4,
             pm10: warming || injectSentinel ? nil : pm10,
-            aqClass: aqClass,
+            classByte: classes.byte,
             fan: simFanSpeed,
             fanMode: simSettings.fanMode ?? .auto,
             status: status,
@@ -1085,12 +1232,39 @@ extension BluetoothManager {
         handleValueUpdate(.sensor, data: packet, error: nil)   // same path as live notifications
     }
 
-    /// Encodes values into the authoritative 52-byte v2 layout (§1.1).
+    /// Classifies a synthetic reading the way firmware does (thresholds-v3 §2.2,
+    /// without hysteresis): per gas, at or below C1 → 1 … above C4 → 5, worst of
+    /// the three; per PM channel, at or below attention → 1, at or below hazard →
+    /// 2, else 3, worst of PM1 / PM2.5 / PM10. The Simulator stands in for the
+    /// device here — the app itself never derives a class from raw values.
+    private static func simClasses(
+        vocIndex: Double?, noxIndex: Double?, co2: Int?,
+        pm1: Double?, pm25: Double?, pm10: Double?,
+        thresholds t: ThresholdsBlob
+    ) -> AirClasses {
+        func gasClass(_ value: Double?, _ edges: [UInt16]) -> UInt8 {
+            // Firmware compares whole index values (live bytes 8–11 ÷ 10, truncated).
+            guard let whole = value?.rounded(.towardZero) else { return 0 }
+            return UInt8((edges.firstIndex { whole <= Double($0) } ?? edges.count) + 1)
+        }
+        func pmClass(_ value: Double?, _ channel: ThresholdsBlob.PMChannel) -> UInt8 {
+            guard let value else { return 0 }
+            if value <= Double(t.attention(channel)) / 10 { return 1 }
+            return value <= Double(t.hazard(channel)) / 10 ? 2 : 3
+        }
+        let gas = Swift.max(gasClass(vocIndex, t.edges(.voc)),
+                            gasClass(noxIndex, t.edges(.nox)),
+                            gasClass(co2.map(Double.init), t.edges(.co2)))
+        let pm = Swift.max(pmClass(pm1, .pm1), pmClass(pm25, .pm25), pmClass(pm10, .pm10))
+        return AirClasses(gas: gas, pm: pm)
+    }
+
+    /// Encodes values into the authoritative 52-byte v3 layout (§1.1).
     private static func makeSimPacket(
         sequence: UInt16,
         tempC: Double?, humidity: Double?, vocIndex: Double?, noxIndex: Double?, co2: Int?,
         pm1: Double?, pm25: Double?, pm4: Double?, pm10: Double?,
-        aqClass: UInt8, fan: Int, fanMode: FanMode, status: UInt8, sen66Status: UInt32
+        classByte: UInt8, fan: Int, fanMode: FanMode, status: UInt8, sen66Status: UInt32
     ) -> Data {
         var b = [UInt8](repeating: 0, count: GATT.sensorPayloadLength)
         let o = GATT.SensorOffset.self
@@ -1127,7 +1301,7 @@ extension BluetoothManager {
         putX10(pm25.map { $0 * 0.6 }, o.nc25)
         putX10(pm4.map  { $0 * 0.4 }, o.nc4)
         putX10(pm10.map { $0 * 0.3 }, o.nc10)
-        b[o.aqClass]    = aqClass
+        b[o.classByte]  = classByte
         b[o.fanPercent] = UInt8(max(0, min(100, fan)))
         b[o.fanMode]    = fanMode.wire
         b[o.status]     = status
@@ -1161,7 +1335,8 @@ extension BluetoothManager {
                 if Task.isCancelled || self.historyStreamContinuation == nil { return }
                 let timestamp = now.addingTimeInterval(-Double(count - i) * 60)
                 self.handleHistoryPacket(Self.makeSimHistoryPacket(
-                    index: i, total: count, timestamp: timestamp, sequence: UInt16(truncatingIfNeeded: i)))
+                    index: i, total: count, timestamp: timestamp, sequence: UInt16(truncatingIfNeeded: i),
+                    thresholds: self.simThresholds))
                 if i % 120 == 119 { try? await Task.sleep(for: .milliseconds(8)) }  // yield to the UI
             }
             if Task.isCancelled || self.historyStreamContinuation == nil { return }
@@ -1169,9 +1344,9 @@ extension BluetoothManager {
         }
     }
 
-    /// Encodes one 34-byte history packet carrying a 26-byte log record v2 (§1.2).
+    /// Encodes one 34-byte history packet carrying a 26-byte log record v3 (§1.2).
     private static func makeSimHistoryPacket(
-        index: Int, total: Int, timestamp: Date, sequence: UInt16
+        index: Int, total: Int, timestamp: Date, sequence: UInt16, thresholds: ThresholdsBlob
     ) -> Data {
         var b = [UInt8](repeating: 0, count: GATT.historyPacketLength)
         func putU16(_ v: UInt16, _ i: Int) { b[i] = UInt8(v & 0xFF); b[i + 1] = UInt8(v >> 8) }
@@ -1209,7 +1384,10 @@ extension BluetoothManager {
         putX10(max(0, pm25), f.pm25)
         putX10(max(0, pm25 + 2), f.pm4)
         putX10(max(0, pm25 + 5), f.pm10)
-        b[r + f.aqClass] = vocIndex <= 100 ? 1 : vocIndex <= 150 ? 2 : vocIndex <= 250 ? 3 : 4
+        b[r + f.classByte] = simClasses(
+            vocIndex: vocIndex, noxIndex: noxIndex, co2: co2,
+            pm1: max(0, pm25 - 4), pm25: max(0, pm25), pm10: max(0, pm25 + 5),
+            thresholds: thresholds).byte
         b[r + f.status]  = 0x4B          // present · fresh · TWAI online · ionizer on
         putU16(sequence, r + f.sequence)
         return Data(b)

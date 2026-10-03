@@ -14,6 +14,15 @@
 //  Values are stored in display units; `nil` for an optional field means the
 //  firmware stored an invalid sentinel.
 //
+//  v3 note: log-record byte 22 is now a packed gas/PM class byte (thresholds-v3
+//  §2.7). `aqClass` keeps its column and now holds the **gas** class 0–5 —
+//  firmware's own aq_class became gas-only in v3, and the CSV export's
+//  `aq_class` column follows it unchanged. The PM class 0–3 is a new optional
+//  column, so the existing store migrates lightweight: a row cached before it
+//  existed reads `nil`, and renders exactly like a v2-era record streamed from
+//  flash (high nibble 0) — a grey PM tile. The firmware log-record version bump
+//  to 3 still wipes the cache on the first sync (§2).
+//
 
 import Foundation
 import SwiftData
@@ -36,7 +45,8 @@ final class HistoryRecord {
     var pm25: Double?
     var pm4: Double?
     var pm10: Double?
-    var aqClass: Int            // 0–5 (0 = unknown/warming)
+    var aqClass: Int            // gas class 0–5 (0 = unknown/warming)
+    var pmClass: Int?           // PM class 0–3 (0 = unknown/warming); nil = cached before v3
     var status: UInt8           // same bitfield as the live packet's byte 35
     var sequence: UInt16
 
@@ -53,6 +63,7 @@ final class HistoryRecord {
         pm4: Double?,
         pm10: Double?,
         aqClass: Int,
+        pmClass: Int?,
         status: UInt8,
         sequence: UInt16
     ) {
@@ -68,6 +79,7 @@ final class HistoryRecord {
         self.pm4 = pm4
         self.pm10 = pm10
         self.aqClass = aqClass
+        self.pmClass = pmClass
         self.status = status
         self.sequence = sequence
     }
@@ -86,15 +98,22 @@ final class HistoryRecord {
             pm25: f.pm25,
             pm4: f.pm4,
             pm10: f.pm10,
-            aqClass: f.aqClass,
+            aqClass: Int(f.classes.gas),
+            pmClass: Int(f.classes.pm),
             status: f.status,
             sequence: f.sequence
         )
     }
 
+    /// Gas class — drives the record's gas tile.
     var aqiLevel: AQILevel { AQILevel(rawValue: aqClass) ?? .unknown }
+    /// PM class — drives the record's PM tile. Unknown (grey) for a v2-era
+    /// record or a row cached before the column existed.
+    var pmLevel: PMLevel { PMLevel(rawValue: pmClass ?? 0) ?? .unknown }
     var deviceStatus: DeviceStatus { DeviceStatus(raw: status) }
 
-    /// Air-quality label with the record's own warming-up context applied (§2).
+    /// Gas-class label with the record's own warming-up context applied (§2).
     var aqClassLabel: String { aqiLevel.label(isWarming: deviceStatus.sen66Warming) }
+    /// PM-class label with the record's own warming-up context applied (§2).
+    var pmClassLabel: String { pmLevel.label(isWarming: deviceStatus.sen66Warming) }
 }

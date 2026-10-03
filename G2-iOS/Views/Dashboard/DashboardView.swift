@@ -2,10 +2,11 @@
 //  DashboardView.swift
 //  G2-iOS
 //
-//  Live air-quality metrics (§4). The derived air-quality class is the visual
-//  anchor; every metric renders "—" for its sentinel; freshness combines the
-//  device's own "fresh this tick" flag (status bit 1) with packet age. Malformed
-//  packets surface non-fatally (§7).
+//  Live air-quality metrics (§4). The two firmware-derived classes are the
+//  visual anchor — a gas tile and a PM tile, one per LED on the device
+//  (thresholds-v3 §1.1); every metric renders "—" for its sentinel; freshness
+//  combines the device's own "fresh this tick" flag (status bit 1) with packet
+//  age. Malformed packets surface non-fatally (§7).
 //
 //  The full SEN66 surface — number concentrations, raw/uncompensated values,
 //  sensor identity, device state and the device status register — lives behind a
@@ -39,7 +40,7 @@ struct DashboardView: View {
                         if let parseError = bluetooth.lastParseError {
                             parseErrorBanner(parseError)
                         }
-                        aqHero(reading)
+                        classTiles(reading)
                         metricGrid(reading)
                         fanCard(reading)
                         sensorDetail(reading)
@@ -91,21 +92,32 @@ struct DashboardView: View {
         return reading.status.isFresh ? "Live" : "Live — repeating last sample"
     }
 
-    // MARK: - Air-quality hero (§4 — visual anchor)
+    // MARK: - Air-quality classes (§4 — visual anchor)
 
-    private func aqHero(_ reading: SensorReading) -> some View {
-        let aq = reading.aqClass
-        return VStack(spacing: 6) {
-            Text("AIR QUALITY")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(Theme.textSecondary)
-            Text(aq.isValid ? "\(aq.rawValue)" : "—")
-                .font(.system(size: 72, weight: .bold, design: .rounded))
-                .foregroundStyle(aq.color)
-                .contentTransition(.numericText())
-            Text(reading.aqClassLabel)
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(Theme.textPrimary)
+    /// Gas and PM tiles, side by side. Each moves independently — blowing on the
+    /// sensor changes the gas tile, dust changes the PM tile — because firmware
+    /// classifies them separately against user-editable edges. Neither is ever
+    /// re-derived from the raw values below (thresholds-v3 §1.1).
+    private func classTiles(_ reading: SensorReading) -> some View {
+        let gas = reading.gasLevel
+        let pm = reading.pmLevel
+        return VStack(spacing: 10) {
+            HStack(spacing: Theme.spacing) {
+                AirClassTile(
+                    title: "GAS",
+                    sources: "VOC · NOx · CO₂",
+                    value: gas.isValid ? "\(gas.rawValue)" : "—",
+                    label: reading.gasClassLabel,
+                    color: gas.color
+                )
+                AirClassTile(
+                    title: "PARTICULATE",
+                    sources: "PM1 · PM2.5 · PM10",
+                    value: pm.isValid ? "\(pm.rawValue)" : "—",
+                    label: reading.pmClassLabel,
+                    color: pm.color
+                )
+            }
             if reading.isWarmingUp {
                 Label("Sensor is warming up — readings settle over the first minute.",
                       systemImage: "hourglass")
@@ -114,22 +126,13 @@ struct DashboardView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, Theme.spacing)
             } else {
-                Text("Air-quality class · 1 (excellent) – 5 (unhealthy)")
+                Text("Gas class 1 (excellent) – 5 (unhealthy) · PM class 1 (good) – 3 (hazard)")
                     .font(.caption2)
                     .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 24)
-        .background(aq.color.opacity(0.14),
-                    in: RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.corner, style: .continuous)
-                .strokeBorder(aq.color.opacity(0.4), lineWidth: 1)
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            "Air quality class \(aq.isValid ? "\(aq.rawValue), \(reading.aqClassLabel)" : reading.aqClassLabel)")
     }
 
     // MARK: - Metric grid (§4)
@@ -382,6 +385,50 @@ struct SEN66StatusRow: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(indicator.label), \(isWarningOnly ? "warning" : "error")")
+    }
+}
+
+/// One firmware-derived class tile — the app's counterpart of one LED on the
+/// device (thresholds-v3 §1.1). Shared by the Dashboard and the history record
+/// detail; `color` comes from `AQILevel` / `PMLevel`, so grey means unknown.
+struct AirClassTile: View {
+    let title: String
+    let sources: String
+    let value: String
+    let label: String
+    let color: Color
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.textSecondary)
+            Text(value)
+                .font(.system(size: 56, weight: .bold, design: .rounded))
+                .foregroundStyle(color)
+                .contentTransition(.numericText())
+            Text(label)
+                .font(.headline)
+                .foregroundStyle(Theme.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Text(sources)
+                .font(.caption2)
+                .foregroundStyle(Theme.textSecondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 20)
+        .padding(.horizontal, 8)
+        .background(color.opacity(0.14),
+                    in: RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.corner, style: .continuous)
+                .strokeBorder(color.opacity(0.4), lineWidth: 1)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title.capitalized) class \(value == "—" ? label : "\(value), \(label)")")
     }
 }
 

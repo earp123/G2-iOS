@@ -12,14 +12,15 @@
 //    byte 1     : 0x48 ('H')
 //    bytes 2–4  : total u24 LE — record count in THIS sync (recent-N → N)
 //    bytes 5–7  : index u24 LE — 0-based position within THIS sync
-//    bytes 8–33 : geue_log_record_t v2 (26 bytes, below)
+//    bytes 8–33 : geue_log_record_t v3 (26 bytes, below)
 //
 //  u24 total/index don't wrap for any realistic buffer (max ~16.7M records), so
 //  index/total are a trustworthy progress fraction. End-of-sync is still detected
 //  by the sentinel packet whose 26 record bytes are all zero (index == total on
 //  that packet as well) — always sent, even for a count-0 sync.
 //
-//  Log record v2 layout (packed, no padding, §1.2), offsets relative to byte 8:
+//  Log record v3 layout (packed, no padding, §1.2), offsets relative to byte 8.
+//  Identical to v2 except byte +22 (thresholds-v3 §2.7):
 //    +0  : timestamp u32 LE (Unix epoch seconds; may be a small seconds-since-boot
 //          value if the RTC read failed at log time — the caching layer
 //          plausibility-checks it)
@@ -32,7 +33,10 @@
 //    +16 : PM2.5       u16 LE ×10
 //    +18 : PM4.0       u16 LE ×10
 //    +20 : PM10        u16 LE ×10
-//    +22 : aq_class u8 (0–5; 0 = unknown/warming)
+//    +22 : class byte u8 — packed like live byte 32: low nibble gas class 0–5,
+//          high nibble PM class 0–3 (0 = unknown/warming). A record logged by
+//          v2 firmware carries aq_class 0–5 here with the high nibble 0, so it
+//          decodes with an unknown (grey) PM class.
 //    +23 : status   u8 (same bitfield as the live packet's byte 35)
 //    +24 : sequence u16 LE (cross-ref only, NOT an ordering key)
 //
@@ -88,7 +92,7 @@ enum HistoryPacketParser {
             pm25:         GATT.decodePMx10(readU16(b, r + f.pm25)),
             pm4:          GATT.decodePMx10(readU16(b, r + f.pm4)),
             pm10:         GATT.decodePMx10(readU16(b, r + f.pm10)),
-            aqClass:      Int(b[r + f.aqClass]),
+            classes:      AirClasses(byte: b[r + f.classByte]),
             status:       b[r + f.status],
             sequence:     readU16(b, r + f.sequence)
         )

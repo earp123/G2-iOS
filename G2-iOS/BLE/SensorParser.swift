@@ -9,6 +9,11 @@
 //  retired v1 marker 0x02 is rejected, not best-effort decoded, because every
 //  field behind it moved (§1.1).
 //
+//  Contract v3 keeps the layout and changes three bytes (thresholds-v3 §2):
+//  byte 1 is payload version 3 (a v2 packet is rejected), byte 32 is the packed
+//  gas/PM class byte, and byte 34 is 0 Auto / 2 Manual — the retired 1 decodes
+//  as Auto and asserts in debug builds.
+//
 //  No force-unwraps: a short, mis-marked or wrong-version payload yields a
 //  `.failure` the UI reports non-fatally, never a crash. Every scaled field goes
 //  through the shared `GATT.decode*` family so a sentinel rule is defined once.
@@ -22,7 +27,7 @@ enum SensorParseError: Error, Equatable, Sendable {
     /// Byte 0 was not the live-v2 marker. Carries the marker actually seen, so a
     /// legacy `0x02` device is identifiable from the message (§1.1).
     case unsupportedMarker(UInt8)
-    /// Byte 1 was not payload version 0x02 (§1.1).
+    /// Byte 1 was not payload version 0x03 — e.g. a v2 packet (§1.1).
     case unsupportedPayloadVersion(UInt8)
 
     /// User-facing, non-fatal description (§7).
@@ -59,7 +64,7 @@ enum SensorParser {
         let b = [UInt8](data)
         let o = GATT.SensorOffset.self
 
-        // Reject anything that isn't a live v2 packet — including the retired
+        // Reject anything that isn't a live packet — including the retired
         // 0x02 layout, whose fields all sit at different offsets (§1.1).
         guard b[o.marker] == GATT.livePacketMarker else {
             return .failure(.unsupportedMarker(b[o.marker]))
@@ -90,7 +95,8 @@ enum SensorParser {
             rawCO2Ppm:       Metric(GATT.decodeU16(readU16(b, o.rawCO2))),
             rawHumidityPct:  Metric(GATT.decodeI16x100(readI16(b, o.rawHumidity))),
             rawTemperatureC: Metric(GATT.decodeI16x200(readI16(b, o.rawTemperature))),
-            aqClass:         AQILevel(raw: b[o.aqClass]),
+            // Packed class byte: low nibble gas 0–5, high nibble PM 0–3.
+            classes:         AirClasses(byte: b[o.classByte]),
             fanSpeedPct:     Int(b[o.fanPercent]),
             fanMode:         FanMode(wire: b[o.fanMode]),
             status:          DeviceStatus(raw: b[o.status]),

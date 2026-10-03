@@ -2,8 +2,10 @@
 //  HistoryDetailView.swift
 //  G2-iOS
 //
-//  Full breakdown of a single history record (§3): all log-record v2 fields,
-//  decoded status bits, and the air-quality class. Sentinel fields render as "—".
+//  Full breakdown of a single history record (§3): all log-record fields,
+//  decoded status bits, and the gas and PM classes (thresholds-v3 §1.1). A
+//  record logged before contract v3 has no PM class — its PM tile is grey.
+//  Sentinel fields render as "—".
 //
 
 import SwiftUI
@@ -14,7 +16,7 @@ struct HistoryDetailView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: Theme.spacing) {
-                aqiHeader
+                classHeader
 
                 VStack(alignment: .leading, spacing: 12) {
                     InfoRow(label: "Timestamp", value: record.timestamp.formatted(date: .abbreviated, time: .standard))
@@ -51,19 +53,25 @@ struct HistoryDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    private var aqiHeader: some View {
-        VStack(spacing: 6) {
-            Text(record.aqiLevel.isValid ? "\(record.aqClass)" : "—")
-                .font(.system(size: 56, weight: .bold, design: .rounded))
-                .foregroundStyle(record.aqiLevel.color)
-            Text(record.aqClassLabel)
-                .font(.headline)
-                .foregroundStyle(Theme.textPrimary)
+    private var classHeader: some View {
+        let gas = record.aqiLevel
+        let pm = record.pmLevel
+        return HStack(spacing: Theme.spacing) {
+            AirClassTile(
+                title: "GAS",
+                sources: "VOC · NOx · CO₂",
+                value: gas.isValid ? "\(gas.rawValue)" : "—",
+                label: record.aqClassLabel,
+                color: gas.color
+            )
+            AirClassTile(
+                title: "PARTICULATE",
+                sources: "PM1 · PM2.5 · PM10",
+                value: pm.isValid ? "\(pm.rawValue)" : "—",
+                label: record.pmClassLabel,
+                color: pm.color
+            )
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 20)
-        .background(record.aqiLevel.color.opacity(0.14),
-                    in: RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
     }
 
     private var statusCard: some View {

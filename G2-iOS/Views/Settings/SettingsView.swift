@@ -2,26 +2,20 @@
 //  SettingsView.swift
 //  G2-iOS
 //
-//  VOC-index threshold editor, LED brightness, device name, diagnostics,
-//  maintenance commands, time-sync and connection management (§6).
+//  LED brightness, device name, diagnostics, maintenance commands, time-sync and
+//  connection management (§6).
 //
 //  Everything that writes settings goes through the full 12-byte payload (§1.3),
-//  so editing one field never clobbers another. Thresholds are validated
-//  strictly-increasing and in-range client-side; the editor is pre-populated from
-//  a READ of the Settings characteristic.
+//  so editing one field never clobbers another; bytes 0–7 are retired in
+//  contract v3 and always written as zero (thresholds-v3 §2.3). The VOC-index
+//  threshold editor and the Custom fan-mapping table are gone with the Custom
+//  mode they drove.
 //
 
 import SwiftUI
 
 struct SettingsView: View {
     @Environment(BluetoothManager.self) private var bluetooth
-
-    // Threshold editor state (VOC index), pre-populated from the device READ.
-    @State private var lo = Int(VOCThresholds.defaults.lo)
-    @State private var med = Int(VOCThresholds.defaults.med)
-    @State private var hi = Int(VOCThresholds.defaults.hi)
-    @State private var maxVal = Int(VOCThresholds.defaults.max)
-    @State private var didPopulateThresholds = false
 
     // LED brightness editor state (§6).
     @State private var brightness = Double(GATT.ledBrightnessDefault)
@@ -34,20 +28,12 @@ struct SettingsView: View {
     @State private var timeSyncNote: String?
     @State private var showCO2RecalConfirm = false
 
-    private var edited: VOCThresholds {
-        VOCThresholds(lo: UInt16(lo), med: UInt16(med), hi: UInt16(hi), max: UInt16(maxVal))
-    }
-    private var isMonotonic: Bool { edited.isMonotonic }
-    private var isInRange: Bool { edited.isInRange }
-    private var isValid: Bool { edited.isValid }
     private var isConnected: Bool { bluetooth.phase == .connected }
 
     var body: some View {
         ScrollView {
             VStack(spacing: Theme.spacing) {
                 deviceNameCard
-                thresholdEditor
-                fanMappingReference
                 brightnessCard
                 diagnostics
                 maintenanceCard
@@ -86,87 +72,6 @@ struct SettingsView: View {
                 placeholder: bluetooth.deviceName ?? "Monitor name",
                 saveTitle: "Save name"
             )
-        }
-        .card()
-    }
-
-    // MARK: - VOC index threshold editor (§6 / §1.3)
-
-    private var thresholdEditor: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            sectionHeader("VOC INDEX THRESHOLDS")
-
-            thresholdStepper("Low",    value: $lo)
-            thresholdStepper("Medium", value: $med)
-            thresholdStepper("High",   value: $hi)
-            thresholdStepper("Max",    value: $maxVal)
-
-            if !isMonotonic {
-                Label("Values must be strictly increasing: low < medium < high < max.",
-                      systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(Theme.aqiPoor)
-            }
-            if !isInRange {
-                Label("The VOC index scale runs \(GATT.vocIndexMin)–\(GATT.vocIndexMax).",
-                      systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(Theme.aqiPoor)
-            }
-
-            HStack {
-                Button("Reset to defaults") {
-                    let d = VOCThresholds.defaults
-                    lo = Int(d.lo); med = Int(d.med); hi = Int(d.hi); maxVal = Int(d.max)
-                }
-                .font(.subheadline)
-                .tint(Theme.textSecondary)
-
-                Spacer()
-
-                Button {
-                    // Writes the full 12-byte payload, preserving brightness and
-                    // the fan fields (§1.3).
-                    bluetooth.writeThresholds(edited)
-                } label: {
-                    Text("Save").font(.headline)
-                        .padding(.horizontal, 20).padding(.vertical, 8)
-                        .background(isValid && isConnected ? Theme.accent : Theme.surfaceHi, in: Capsule())
-                        .foregroundStyle(isValid && isConnected ? Theme.background : Theme.textSecondary)
-                }
-                .disabled(!isValid || !isConnected)   // disable Save until valid (§6)
-            }
-        }
-        .card()
-    }
-
-    private func thresholdStepper(_ label: String, value: Binding<Int>) -> some View {
-        HStack {
-            Text(label).foregroundStyle(Theme.textPrimary)
-            Spacer()
-            Text("\(value.wrappedValue)")
-                .font(.headline.monospacedDigit())
-                .foregroundStyle(Theme.accent)
-                .frame(minWidth: 64, alignment: .trailing)
-            // Range and step per §6: 1–500, step 10.
-            Stepper(label, value: value, in: VOCThresholds.validRange, step: 10)
-                .labelsHidden()
-        }
-    }
-
-    // MARK: - VOC index → fan mapping (read-only reference, §6)
-
-    private var fanMappingReference: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("FAN MAPPING (CUSTOM)")
-            ForEach(edited.fanMappingRows) { row in
-                HStack {
-                    Text("VOC index \(row.condition)").foregroundStyle(Theme.textSecondary)
-                    Spacer()
-                    Text(row.fanSpeed).foregroundStyle(Theme.textPrimary).monospacedDigit()
-                }
-                .font(.subheadline)
-            }
         }
         .card()
     }
@@ -429,15 +334,10 @@ struct SettingsView: View {
         Text(text).font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary)
     }
 
-    /// Populates the editors from the device's current settings, once each. The
-    /// brightness slider is not overwritten mid-drag.
+    /// Populates the brightness slider from the device's current settings, once.
+    /// The slider is not overwritten mid-drag.
     private func populateFromSettings() {
         guard let settings = bluetooth.settings else { return }
-        if !didPopulateThresholds {
-            let t = settings.thresholds
-            lo = Int(t.lo); med = Int(t.med); hi = Int(t.hi); maxVal = Int(t.max)
-            didPopulateThresholds = true
-        }
         if !didPopulateBrightness, !isDraggingBrightness {
             brightness = Double(settings.ledBrightnessPct)
             didPopulateBrightness = true
