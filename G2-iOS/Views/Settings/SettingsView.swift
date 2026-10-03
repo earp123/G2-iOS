@@ -2,9 +2,15 @@
 //  SettingsView.swift
 //  G2-iOS
 //
-//  TVOC threshold editor + device diagnostics + time-sync + connection management
-//  (§6.4). Thresholds are validated strictly-increasing client-side and the editor
-//  is pre-populated from a READ of the Settings characteristic (§2.5).
+//  Device name, air quality thresholds, LED brightness, diagnostics, maintenance
+//  commands, time-sync and connection management (§6; thresholds-v3 §3).
+//
+//  Everything that writes settings goes through the full 12-byte payload (§1.3),
+//  so editing one field never clobbers another; bytes 0–7 are retired in
+//  contract v3 and always written as zero (thresholds-v3 §2.3). The VOC-index
+//  threshold editor and the Custom fan-mapping table are gone with the Custom
+//  mode they drove; every band now lives in the Air quality thresholds section
+//  (`ThresholdsEditor`), which reads and writes the 60-byte Thresholds blob.
 //
 
 import SwiftUI
@@ -12,112 +18,98 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(BluetoothManager.self) private var bluetooth
 
-    // Editor state (ppb), pre-populated from the device READ.
-    @State private var lo = Int(TVOCThresholds.defaults.lo)
-    @State private var med = Int(TVOCThresholds.defaults.med)
-    @State private var hi = Int(TVOCThresholds.defaults.hi)
-    @State private var maxVal = Int(TVOCThresholds.defaults.max)
-    @State private var didPopulate = false
-    @State private var timeSyncNote: String?
+    // LED brightness editor state (§6).
+    @State private var brightness = Double(GATT.ledBrightnessDefault)
+    @State private var isDraggingBrightness = false
+    @State private var didPopulateBrightness = false
 
-    private var edited: TVOCThresholds {
-        TVOCThresholds(lo: UInt16(lo), med: UInt16(med), hi: UInt16(hi), max: UInt16(maxVal))
-    }
-    private var isValid: Bool { edited.isMonotonic }
+    // Device name editor state (§6).
+    @State private var nameDraft = ""
+
+    @State private var timeSyncNote: String?
+    @State private var showCO2RecalConfirm = false
+
+    private var isConnected: Bool { bluetooth.phase == .connected }
 
     var body: some View {
         ScrollView {
             VStack(spacing: Theme.spacing) {
-                thresholdEditor
-                fanMappingReference
+                deviceNameCard
+                ThresholdsEditor()
+                brightnessCard
                 diagnostics
+                maintenanceCard
                 timeSyncStub
                 disconnectButton
             }
             .padding(Theme.spacing)
         }
+        .scrollDismissesKeyboard(.interactively)
         .background(Theme.background)
         .onAppear {
             bluetooth.readSettings()
-            populateIfPossible()
+            bluetooth.readDeviceName()
+            bluetooth.readDeviceInfo()
+            populateFromSettings()
         }
-        .onChange(of: bluetooth.thresholds) { _, _ in populateIfPossible() }
+        .onChange(of: bluetooth.settings) { _, _ in populateFromSettings() }
+        .alert("Calibrate CO₂ outdoors?", isPresented: $showCO2RecalConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Calibrate") { bluetooth.sendCO2Recalibration() }
+        } message: {
+            Text("The monitor must have been outdoors in fresh air for at least 3 minutes. "
+                 + "This sets the CO₂ reference to \(GATT.co2RecalibrationReferencePpm) ppm. "
+                 + "Calibrating indoors will make every later reading wrong.")
+        }
     }
 
-    // MARK: - TVOC threshold editor (§6.4 / §2.5)
+    // MARK: - Device name (§6 / §1.4)
 
-    private var thresholdEditor: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            sectionHeader("TVOC THRESHOLDS (ppb)")
+    private var deviceNameCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader("DEVICE NAME")
+            InfoRow(label: "Current", value: bluetooth.deviceName ?? "—")
+            Divider().overlay(Theme.hairline)
+            DeviceNameEditor(
+                name: $nameDraft,
+                placeholder: bluetooth.deviceName ?? "Monitor name",
+                saveTitle: "Save name"
+            )
+        }
+        .card()
+    }
 
-            thresholdStepper("Low",    value: $lo)
-            thresholdStepper("Medium", value: $med)
-            thresholdStepper("High",   value: $hi)
-            thresholdStepper("Max",    value: $maxVal)
+    // MARK: - LED brightness (§6)
 
-            if !isValid {
-                Label("Values must be strictly increasing: low < medium < high < max.",
-                      systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(Theme.aqiPoor)
-            }
-
+    private var brightnessCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Button("Reset to defaults") {
-                    let d = TVOCThresholds.defaults
-                    lo = Int(d.lo); med = Int(d.med); hi = Int(d.hi); maxVal = Int(d.max)
-                }
-                .font(.subheadline)
-                .tint(Theme.textSecondary)
-
+                sectionHeader("LED BRIGHTNESS")
                 Spacer()
-
-                Button {
-                    bluetooth.writeSettings(edited)   // validates + writes 8 bytes (§2.5)
-                } label: {
-                    Text("Save").font(.headline)
-                        .padding(.horizontal, 20).padding(.vertical, 8)
-                        .background(isValid ? Theme.accent : Theme.surfaceHi,
-                                    in: Capsule())
-                        .foregroundStyle(isValid ? Theme.background : Theme.textSecondary)
-                }
-                .disabled(!isValid)   // disable Save until valid (§6.4)
+                Text("\(Int(brightness))%")
+                    .font(.headline.monospacedDigit())
+                    .foregroundStyle(Theme.accent)
             }
+            Slider(
+                value: $brightness,
+                in: Double(GATT.ledBrightnessMin)...Double(GATT.ledBrightnessMax),
+                step: 1
+            ) { editing in
+                isDraggingBrightness = editing
+                // Debounced like the fan slider: one 12-byte write on release (§6).
+                if !editing { bluetooth.writeLEDBrightness(UInt8(brightness)) }
+            }
+            .tint(Theme.accent)
+            .disabled(!isConnected)
+            Text("Sets the indicator LED brightness, \(GATT.ledBrightnessMin)–\(GATT.ledBrightnessMax)%. "
+                 + "Saved on the monitor and used at the next start.")
+                .font(.caption2)
+                .foregroundStyle(Theme.textSecondary)
         }
         .card()
     }
 
-    private func thresholdStepper(_ label: String, value: Binding<Int>) -> some View {
-        HStack {
-            Text(label).foregroundStyle(Theme.textPrimary)
-            Spacer()
-            Text("\(value.wrappedValue)")
-                .font(.headline.monospacedDigit())
-                .foregroundStyle(Theme.accent)
-                .frame(minWidth: 64, alignment: .trailing)
-            Stepper(label, value: value, in: 0...65535, step: 10)
-                .labelsHidden()
-        }
-    }
-
-    // MARK: - TVOC → fan mapping (read-only reference, §2.5)
-
-    private var fanMappingReference: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionHeader("FAN MAPPING (TVOC AUTO)")
-            ForEach(edited.fanMappingRows) { row in
-                HStack {
-                    Text(row.condition).foregroundStyle(Theme.textSecondary)
-                    Spacer()
-                    Text(row.fanSpeed).foregroundStyle(Theme.textPrimary).monospacedDigit()
-                }
-                .font(.subheadline)
-            }
-        }
-        .card()
-    }
-
-    // MARK: - Diagnostics (§6.4)
+    // MARK: - Diagnostics (§6)
 
     private var diagnostics: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -134,19 +126,97 @@ struct SettingsView: View {
                 } else { Text("—").foregroundStyle(Theme.textSecondary) }
             }
             Divider().overlay(Theme.hairline)
-            InfoRow(label: "Negotiated MTU", value: bluetooth.mtu.map { "\($0) bytes" } ?? "Unavailable")
+            HStack {
+                Text("Negotiated MTU").foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Text(bluetooth.mtu.map { "\($0) bytes" } ?? "Unavailable")
+                    .monospacedDigit()
+                    .foregroundStyle(bluetooth.mtuIsTooSmall ? Theme.aqiUnhealthy : Theme.textPrimary)
+                if bluetooth.mtuIsTooSmall {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.aqiUnhealthy)
+                }
+            }
+            if bluetooth.mtuIsTooSmall {
+                // The 52-byte live packet needs ATT MTU >= 55 (notes §8).
+                Text("Below the \(BluetoothManager.minimumUsableMTU) bytes a 52-byte sensor packet needs — "
+                     + "notifications may arrive truncated.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.aqiUnhealthy)
+            }
+
+            deviceInfoRows
 
             Divider().overlay(Theme.hairline)
-            Text("SENSOR HEALTH").font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary)
+            Text("DEVICE STATUS").font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary)
             if let status = bluetooth.latestReading?.status {
                 ForEach(status.indicators) { StatusIndicatorRow(indicator: $0) }
             } else {
                 Text("Awaiting a sensor reading…")
                     .font(.subheadline).foregroundStyle(Theme.textSecondary)
             }
+
+            Divider().overlay(Theme.hairline)
+            sen66StatusRows
         }
         .font(.subheadline)
         .card()
+    }
+
+    @ViewBuilder
+    private var deviceInfoRows: some View {
+        Divider().overlay(Theme.hairline)
+        if let info = bluetooth.deviceInfo {
+            InfoRow(label: "SEN66 serial", value: info.serialText)
+            Divider().overlay(Theme.hairline)
+            InfoRow(label: "SEN66 firmware", value: info.firmwareVersionText)
+            Divider().overlay(Theme.hairline)
+            HStack {
+                Text("Contract version").foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Text("\(info.contractVersion)")
+                    .monospacedDigit()
+                    .foregroundStyle(info.isContractSupported ? Theme.textPrimary : Theme.aqiUnhealthy)
+                if !info.isContractSupported {
+                    Image(systemName: "xmark.octagon.fill").foregroundStyle(Theme.aqiUnhealthy)
+                }
+            }
+            if !info.isContractSupported {
+                // Reported, never worked around (§9.3).
+                Text("This monitor reports contract v\(info.contractVersion); this app implements "
+                     + "v\(GATT.contractVersion). Readings may be wrong or absent — report this rather "
+                     + "than relying on the values shown.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.aqiUnhealthy)
+            }
+            Divider().overlay(Theme.hairline)
+            InfoRow(label: "Log record version", value: "\(info.logRecordVersion)")
+        } else {
+            InfoRow(label: "Device info", value: "Unavailable")
+        }
+    }
+
+    @ViewBuilder
+    private var sen66StatusRows: some View {
+        Text("SEN66 STATUS FLAGS").font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary)
+        if let sen66 = bluetooth.latestReading?.sen66Status {
+            HStack {
+                Text("Register").foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Text(sen66.hexDescription).monospacedDigit().foregroundStyle(Theme.textPrimary)
+            }
+            if sen66.isClean {
+                Label("No faults reported", systemImage: "checkmark.circle.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.aqiExcellent)
+            } else {
+                ForEach(sen66.activeIndicators) { indicator in
+                    SEN66StatusRow(indicator: indicator, isWarningOnly: indicator.bit == 21)
+                }
+            }
+        } else {
+            Text("Awaiting a sensor reading…")
+                .font(.subheadline).foregroundStyle(Theme.textSecondary)
+        }
     }
 
     private var connectionText: String {
@@ -158,7 +228,66 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Time-sync (opcode 0x0B SET_TIME, §6.4 / §2.4)
+    // MARK: - Maintenance (§6 / §1.6)
+
+    private var maintenanceCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeader("SENSOR MAINTENANCE")
+
+            // Firmware ignores 0x0D while the sensor is warming, and cleaning
+            // re-arms the warming bit afterwards (notes §4).
+            maintenanceButton(
+                title: "Clean sensor fan",
+                icon: "fan.fill",
+                note: bluetooth.sensorIsWarming
+                    ? "Unavailable while the sensor is warming up."
+                    : "Runs the SEN66 fan-cleaning cycle — about 12 s. PM readings pause and the "
+                    + "sensor warms up again afterwards.",
+                isEnabled: !bluetooth.sensorIsWarming
+            ) { bluetooth.sendFanCleaning() }
+
+            Divider().overlay(Theme.hairline)
+
+            maintenanceButton(
+                title: "Clear sensor errors",
+                icon: "arrow.counterclockwise.circle",
+                note: "Clears latched error flags in the SEN66 device status register."
+            ) { bluetooth.sendClearSensorErrors() }
+
+            Divider().overlay(Theme.hairline)
+
+            maintenanceButton(
+                title: "Calibrate CO₂ outdoors",
+                icon: "carbon.dioxide.cloud.fill",
+                note: "Sets the CO₂ reference to \(GATT.co2RecalibrationReferencePpm) ppm. "
+                    + "Only valid after at least 3 minutes outdoors."
+            ) { showCO2RecalConfirm = true }
+        }
+        .card()
+    }
+
+    private func maintenanceButton(
+        title: String, icon: String, note: String,
+        isEnabled: Bool = true, action: @escaping () -> Void
+    ) -> some View {
+        let enabled = isConnected && isEnabled
+        return VStack(alignment: .leading, spacing: 6) {
+            Button(action: action) {
+                Label(title, systemImage: icon)
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 10).padding(.horizontal, 12)
+                    .background(Theme.surfaceHi, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .foregroundStyle(enabled ? Theme.textPrimary : Theme.textSecondary)
+            }
+            .disabled(!enabled)
+            Text(note)
+                .font(.caption2)
+                .foregroundStyle(Theme.textSecondary)
+        }
+    }
+
+    // MARK: - Time-sync (opcode 0x0B SET_TIME, §6 / §1.6)
 
     private var timeSyncStub: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -175,7 +304,7 @@ struct SettingsView: View {
                     .background(Theme.surfaceHi, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .foregroundStyle(Theme.textPrimary)
             }
-            .disabled(bluetooth.phase != .connected)
+            .disabled(!isConnected)
 
             if let note = timeSyncNote {
                 Label(note, systemImage: "checkmark.circle")
@@ -186,7 +315,7 @@ struct SettingsView: View {
         .card()
     }
 
-    // MARK: - Connection management (§6.4)
+    // MARK: - Connection management (§6)
 
     private var disconnectButton: some View {
         Button(role: .destructive) {
@@ -208,10 +337,13 @@ struct SettingsView: View {
         Text(text).font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary)
     }
 
-    /// Populate the editor from the device's current thresholds, once.
-    private func populateIfPossible() {
-        guard !didPopulate, let t = bluetooth.thresholds else { return }
-        lo = Int(t.lo); med = Int(t.med); hi = Int(t.hi); maxVal = Int(t.max)
-        didPopulate = true
+    /// Populates the brightness slider from the device's current settings, once.
+    /// The slider is not overwritten mid-drag.
+    private func populateFromSettings() {
+        guard let settings = bluetooth.settings else { return }
+        if !didPopulateBrightness, !isDraggingBrightness {
+            brightness = Double(settings.ledBrightnessPct)
+            didPopulateBrightness = true
+        }
     }
 }

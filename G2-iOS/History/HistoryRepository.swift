@@ -2,7 +2,7 @@
 //  HistoryRepository.swift
 //  G2-iOS
 //
-//  The history data layer abstraction (§4.1). Two implementations exist and both
+//  The history data layer abstraction (§3). Two implementations exist and both
 //  compile: MockHistoryRepository and BLEHistoryRepository, selected by a single
 //  DI switch (see HistoryDataSource). Heavy reads/writes go through the shared
 //  HistoryDataStore actor; repositories own sync/generation policy only.
@@ -21,21 +21,26 @@ enum HistorySyncResult: Equatable, Sendable {
     case noRecords
 }
 
-/// Parsed field values from a single 22-byte geue_log_record_t. A plain Sendable
-/// struct so it can cross the AsyncStream and actor boundaries without touching
-/// SwiftData models.
+/// Parsed field values from a single 26-byte `geue_log_record_t` v3 (§1.2). A
+/// plain Sendable struct so it can cross the AsyncStream and actor boundaries
+/// without touching SwiftData models.
+///
+/// Values are in display units — the parser has already undone the ×10/×100 wire
+/// scalings — and `nil` means the firmware stored an invalid sentinel.
 struct HistoryRecordFields: Sendable {
     let timestamp:    Date
-    let temperatureC: Double?
-    let humidityPct:  Double?
-    let tvocPpb:      Int?
-    let eco2Ppm:      Int?
-    let aqi:          Int
-    let status:       UInt8
+    let temperatureC: Double?   // °C
+    let humidityPct:  Double?   // %
+    let vocIndex:     Double?   // index 1.0–500.0
+    let noxIndex:     Double?   // index 1.0–500.0
+    let co2Ppm:       Double?   // ppm
+    let pm1:          Double?   // µg/m³
+    let pm25:         Double?
+    let pm4:          Double?
+    let pm10:         Double?
+    let classes:      AirClasses // byte 22, packed gas 0–5 / PM 0–3 (0 = unknown/warming)
+    let status:       UInt8     // same bitfield as the live packet's byte 35
     let sequence:     UInt16
-    let pm1:          Int?   // µg/m³ (nil = sentinel)
-    let pm25:         Int?
-    let pm10:         Int?
 }
 
 /// How much history to request from the device (BLE_HISTORY_PROTOCOL.md).
@@ -61,6 +66,10 @@ protocol HistorySyncTransport: AnyObject {
     var isConnected: Bool { get }
     /// Short ID of the connected device (last two bytes of its Bluetooth identifier).
     var connectedDeviceID: String? { get }
+    /// Log-record version the connected device reports in Device Info byte 35,
+    /// or nil if Device Info has not been read. A change invalidates the whole
+    /// cache (§2).
+    var deviceLogRecordVersion: UInt8? { get }
     /// Sends the sync command and returns a stream of events. Finishes on the
     /// end-of-sync sentinel, on link loss, or on the inactivity timeout.
     func startHistorySync(mode: HistorySyncMode) -> AsyncStream<HistoryStreamEvent>

@@ -27,9 +27,19 @@ struct G2_iOSApp: App {
     private let container: ModelContainer
 
     init() {
+        // Contract v2 replaced the log record outright — TVOC ppb and eCO2 became
+        // a VOC index and measured CO2, and PM4/NOx/aq_class joined (§1.2). The app
+        // is pre-1.0 with no production data, so the store is re-pointed at a new
+        // file and the old one deleted, rather than carrying a versioned migration
+        // for records whose semantics changed (§3 / §9.4).
+        Self.deleteLegacyStoreIfPresent()
+
         let container: ModelContainer
         do {
-            container = try ModelContainer(for: HistoryRecord.self)
+            container = try ModelContainer(
+                for: HistoryRecord.self,
+                configurations: ModelConfiguration(url: Self.storeURL)
+            )
         } catch {
             fatalError("Failed to create SwiftData container: \(error)")
         }
@@ -58,11 +68,33 @@ struct G2_iOSApp: App {
             repository: repository, dataStore: dataStore, modelContext: context))
     }
 
+    /// Store file for log record v2 (§3). Sits beside the default SwiftData
+    /// location; naming it explicitly is what makes the old store dead weight
+    /// rather than something SwiftData would try to migrate.
+    private static let storeURL: URL = {
+        let base = URL.applicationSupportDirectory
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base.appending(path: "history-v2.store")
+    }()
+
+    /// Removes the pre-v2 SwiftData store (and its SQLite sidecars) once. Runs on
+    /// every launch but is a no-op after the first — the files are gone (§3).
+    private static func deleteLegacyStoreIfPresent() {
+        let fm = FileManager.default
+        let base = URL.applicationSupportDirectory
+        // SwiftData's default store, plus the WAL/SHM sidecars SQLite leaves next
+        // to it. Removing the .store alone would strand uncheckpointed pages.
+        for name in ["default.store", "default.store-shm", "default.store-wal"] {
+            let url = base.appending(path: name)
+            if fm.fileExists(atPath: url.path) { try? fm.removeItem(at: url) }
+        }
+    }
+
     /// Wipes persisted history when the DI source (or cache schema generation)
-    /// differs from the last launch. Bump the `-v2` suffix on breaking cache changes.
+    /// differs from the last launch. Bump the suffix on breaking cache changes.
     private static func clearHistoryIfSourceChanged(in context: ModelContext) {
         let key = "historyDataSource"
-        let current = "\(String(describing: historyDataSource))-v2"   // v2: per-device scoping
+        let current = "\(String(describing: historyDataSource))-v3"   // v3: SEN66 log record v2
         let defaults = UserDefaults.standard
         guard defaults.string(forKey: key) != current else { return }
         try? context.delete(model: HistoryRecord.self)

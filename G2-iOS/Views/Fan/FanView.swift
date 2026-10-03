@@ -2,10 +2,16 @@
 //  FanView.swift
 //  G2-iOS
 //
-//  Full fan-control surface (§6.2). Every opcode is wired: Auto (0x03), TVOC Auto
-//  (0x0A), Off/Low/Med/High/Max (0x04–0x08), manual slider (0x02, debounced),
-//  and Refresh (0x09). The device's reported speed (byte 23) is the source of truth
-//  and is reflected back into the slider whenever the user isn't dragging.
+//  Full fan-control surface. Every opcode is wired: Auto (0x03),
+//  Off/Low/Med/High/Max (0x04–0x08), manual slider (0x02, debounced), and Refresh
+//  (0x09). The device's reported speed is the source of truth and is reflected
+//  back into the slider whenever the user isn't dragging.
+//
+//  ⚠️ UNREFERENCED. ConditioningView superseded this screen (it adds ionizer
+//  health, device-mirrored mode and the Manual-0 % warning) and is what
+//  MainTabView presents. Carried through the SEN66 migration only far enough to
+//  keep the target compiling — it does NOT implement the §5 mode-mirroring
+//  rules. Delete it, or re-point MainTabView at it, rather than leaving both.
 //
 
 import SwiftUI
@@ -127,17 +133,14 @@ struct FanView: View {
         .card()
     }
 
-    // MARK: - Auto modes
+    // MARK: - Auto mode
 
     private var autoModeNote: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(mode == .auto ? "AQI-driven auto" : "TVOC-setpoint auto",
-                  systemImage: "wand.and.stars")
+            Label(FanMode.auto.note, systemImage: "wand.and.stars")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Theme.textPrimary)
-            Text(mode == .auto
-                 ? "The monitor adjusts the fan automatically based on the AQI reading."
-                 : "The monitor adjusts the fan using the TVOC thresholds. Edit them in Settings.")
+            Text("The monitor runs the fan at the higher of its gas-class and PM-class speeds.")
                 .font(.footnote)
                 .foregroundStyle(Theme.textSecondary)
         }
@@ -167,7 +170,6 @@ struct FanView: View {
     private func applyMode(_ newMode: FanMode) {
         switch newMode {
         case .auto:     bluetooth.setFanAuto()
-        case .tvocAuto: bluetooth.setFanTVOCAuto()
         case .manual:   break   // user drives via presets/slider
         }
     }

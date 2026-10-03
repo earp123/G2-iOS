@@ -2,10 +2,16 @@
 //  ConditioningView.swift
 //  G2-iOS
 //
-//  Unified conditioning control (§6.2): combines fan speed control with ionizer
-//  power/health monitoring. Fan control includes Auto, TVOC Auto, and Manual modes
-//  with presets and debounced slider. Ionizer state (off/healthy/faulted) displayed
-//  as read-only status.
+//  Unified conditioning control (§5): fan speed and mode plus ionizer
+//  power/health monitoring.
+//
+//  v2 note: the mode picker **mirrors the device** (live byte 34) instead of
+//  holding app-local state. Device-driven updates must not echo back as
+//  commands, so a write only happens when the selection differs from the last
+//  mode the device reported.
+//
+//  v3 note: the picker is Auto / Manual. Custom (opcode 0x0A) is retired — the
+//  gas fan table in Settings → Air quality thresholds replaced it.
 //
 
 import SwiftUI
@@ -13,16 +19,23 @@ import SwiftUI
 struct ConditioningView: View {
     @Environment(BluetoothManager.self) private var bluetooth
 
-    @State private var mode: FanMode = .manual
+    @State private var mode: FanMode = .auto
+    /// The last mode the device reported. Guards `onChange(of: mode)` so
+    /// mirroring the device never re-sends a command back to it (§5).
+    @State private var lastDeviceMode: FanMode?
     @State private var sliderValue: Double = 0
     @State private var isDragging = false
 
     private var deviceSpeed: Int { bluetooth.latestReading?.fanSpeedPct ?? 0 }
+    private var deviceMode: FanMode? { bluetooth.latestReading?.fanMode }
     private var deviceStatus: DeviceStatus? { bluetooth.latestReading?.status }
 
     var body: some View {
         ScrollView {
             VStack(spacing: Theme.spacing) {
+                if bluetooth.showsManualOffWarning {
+                    manualOffWarning
+                }
                 ionizeHealthCard
                 currentSpeedCard
                 modePicker
@@ -36,9 +49,50 @@ struct ConditioningView: View {
             }
             .padding(Theme.spacing)
         }
-        .onAppear { syncSliderToDevice() }
+        .onAppear {
+            syncSliderToDevice()
+            adoptDeviceMode(deviceMode)
+        }
         .onChange(of: deviceSpeed) { _, _ in syncSliderToDevice() }
-        .onChange(of: mode) { _, newMode in applyMode(newMode) }
+        .onChange(of: deviceMode) { _, newDeviceMode in adoptDeviceMode(newDeviceMode) }
+        .onChange(of: mode) { _, newMode in
+            // Only a user-driven change writes; a change we just adopted from the
+            // device matches `lastDeviceMode` and is ignored (§5).
+            guard newMode != lastDeviceMode else { return }
+            applyMode(newMode)
+        }
+    }
+
+    // MARK: - Manual 0 % warning (§5)
+    //
+    // Firmware restores Manual 0 % exactly as saved, by design — the fan stays
+    // off across the next ignition cycle and the PM floor is bypassed. This is
+    // the app-side half of that decision: say so, persistently.
+
+    private var manualOffWarning: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Fan is off and will stay off", systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.aqiModerate)
+            Text("Fan is set to Manual / Off and will stay off at the next start. "
+                 + "Switch to Auto to restore automatic control.")
+                .font(.footnote)
+                .foregroundStyle(Theme.textPrimary)
+            Button("Switch to Auto") { mode = .auto }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .font(.subheadline.weight(.semibold))
+                .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Theme.spacing)
+        .background(Theme.aqiModerate.opacity(0.14),
+                    in: RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.corner, style: .continuous)
+                .strokeBorder(Theme.aqiModerate.opacity(0.45), lineWidth: 1)
+        )
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: - Ionizer health status
@@ -117,7 +171,7 @@ struct ConditioningView: View {
         }
     }
 
-    // MARK: - Fan speed (device is source of truth, §6.2)
+    // MARK: - Fan speed (device is source of truth, §5)
 
     private var currentSpeedCard: some View {
         VStack(spacing: 4) {
@@ -138,11 +192,19 @@ struct ConditioningView: View {
                     in: RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
     }
 
-    // MARK: - Mode (§6.2)
+    // MARK: - Mode — mirrors live byte 34 (§5)
 
     private var modePicker: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("MODE").font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary)
+            HStack {
+                Text("MODE").font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary)
+                Spacer()
+                if deviceMode == nil {
+                    Text("Awaiting device…")
+                        .font(.caption2)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
             Picker("Mode", selection: $mode) {
                 ForEach(FanMode.allCases) { Text($0.title).tag($0) }
             }
@@ -151,7 +213,7 @@ struct ConditioningView: View {
         .card()
     }
 
-    // MARK: - Presets (§6.2 — 25/50/75/100%)
+    // MARK: - Presets (§5 — 25/50/75/100%)
 
     private var presetsCard: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -179,7 +241,7 @@ struct ConditioningView: View {
         .card()
     }
 
-    // MARK: - Manual slider (§6.2 — 0x02, debounced on release)
+    // MARK: - Manual slider (§5 — 0x02, debounced on release)
 
     private var sliderCard: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -204,17 +266,15 @@ struct ConditioningView: View {
         .card()
     }
 
-    // MARK: - Auto modes
+    // MARK: - Auto mode
 
     private var autoModeNote: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(mode == .auto ? "AQI-driven auto" : "TVOC-setpoint auto",
-                  systemImage: "wand.and.stars")
+            Label(mode.note, systemImage: "wand.and.stars")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Theme.textPrimary)
-            Text(mode == .auto
-                 ? "The monitor adjusts the fan automatically based on the AQI reading."
-                 : "The monitor adjusts the fan using the TVOC thresholds. Edit them in Settings.")
+            Text("The monitor runs the fan at the higher of its gas-class and PM-class speeds. "
+                 + "Edit them in Settings → Air quality thresholds.")
                 .font(.footnote)
                 .foregroundStyle(Theme.textSecondary)
         }
@@ -241,11 +301,22 @@ struct ConditioningView: View {
         sliderValue = Double(deviceSpeed)
     }
 
+    /// Mirrors the device's reported mode into the picker. `lastDeviceMode` is
+    /// updated **before** the selection so `onChange(of: mode)` recognises the
+    /// change as device-driven and stays silent (§5).
+    private func adoptDeviceMode(_ newDeviceMode: FanMode?) {
+        guard let newDeviceMode else { return }
+        lastDeviceMode = newDeviceMode
+        if mode != newDeviceMode { mode = newDeviceMode }
+    }
+
     private func applyMode(_ newMode: FanMode) {
         switch newMode {
-        case .auto:     bluetooth.setFanAuto()
-        case .tvocAuto: bluetooth.setFanTVOCAuto()
-        case .manual:   break
+        case .auto:   bluetooth.setFanAuto()
+        case .manual:
+            // Manual has no mode opcode — the device enters it by being given a
+            // speed. Send the one already on screen so nothing jumps (§5).
+            bluetooth.setFanManual(percent: Int(sliderValue))
         }
     }
 }

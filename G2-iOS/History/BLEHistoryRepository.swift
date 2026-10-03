@@ -30,7 +30,12 @@ final class BLEHistoryRepository: HistoryRepository {
     /// uneven logging cadence (protocol doc: "add a small safety margin").
     private static let syncMarginRecords: UInt32 = 30
     private static let lastDeviceKey = "lastHistoryDeviceID"
+    /// Last log-record version the cache was written under (§2).
+    private static let recordVersionKey = "historyLogRecordVersion"
     private static let batchSize = 500
+
+    /// The record-version check runs once per launch, on the first sync.
+    private var didCheckRecordVersion = false
 
     init(dataStore: HistoryDataStore, transport: HistorySyncTransport? = nil) {
         self.dataStore = dataStore
@@ -54,6 +59,10 @@ final class BLEHistoryRepository: HistoryRepository {
         guard let transport, transport.isConnected, let deviceID = transport.connectedDeviceID else {
             return .notConnected
         }
+
+        // A firmware log-record version change invalidates every cached row
+        // before anything is read back (§2).
+        await wipeCacheIfRecordVersionChanged(reportedBy: transport)
 
         // Pick full vs incremental from the device's cached high-water mark.
         let newest = try? await dataStore.newestTimestamp(deviceID: deviceID)
@@ -110,5 +119,27 @@ final class BLEHistoryRepository: HistoryRepository {
         UserDefaults.standard.set(deviceID, forKey: Self.lastDeviceKey)
         let count = (try? await dataStore.recordCount(deviceID: deviceID, since: nil)) ?? received
         return .completed(count: count)
+    }
+
+    /// Compares the device's reported log-record version against the version the
+    /// cache was written under and wipes **all** rows when it differs. Runs once
+    /// per launch, on the first sync (§2).
+    ///
+    /// Records written under a different record layout carry different semantics
+    /// (v1 stored TVOC ppb and eCO₂ where v2 stores a VOC index and measured CO₂),
+    /// so they are discarded rather than mixed in. A device that has not reported
+    /// Device Info yet is assumed to speak this build's version — it cannot have
+    /// streamed a record of any other shape through this parser.
+    private func wipeCacheIfRecordVersionChanged(reportedBy transport: HistorySyncTransport) async {
+        guard !didCheckRecordVersion else { return }
+        didCheckRecordVersion = true
+
+        let reported = Int(transport.deviceLogRecordVersion ?? GATT.historyRecordVersion)
+        let defaults = UserDefaults.standard
+        let cached = defaults.object(forKey: Self.recordVersionKey) as? Int
+        guard cached != reported else { return }
+
+        try? await dataStore.deleteAllRecords()
+        defaults.set(reported, forKey: Self.recordVersionKey)
     }
 }

@@ -21,17 +21,19 @@ import SwiftData
 /// extractor can run on the HistoryDataStore executor (the project defaults new
 /// types to MainActor isolation).
 nonisolated enum HistorySeriesKind: Sendable {
-    case temperature, humidity, tvoc, eco2, pm1, pm25, pm10
+    case temperature, humidity, vocIndex, noxIndex, co2, pm1, pm25, pm4, pm10
 
     func value(from record: HistoryRecord) -> Double? {
         switch self {
         case .temperature: record.temperatureC
         case .humidity:    record.humidityPct
-        case .tvoc:        record.tvocPpb.map(Double.init)
-        case .eco2:        record.eco2Ppm.map(Double.init)
-        case .pm1:         record.pm1.map(Double.init)
-        case .pm25:        record.pm25.map(Double.init)
-        case .pm10:        record.pm10.map(Double.init)
+        case .vocIndex:    record.vocIndex
+        case .noxIndex:    record.noxIndex
+        case .co2:         record.co2Ppm
+        case .pm1:         record.pm1
+        case .pm25:        record.pm25
+        case .pm4:         record.pm4
+        case .pm10:        record.pm10
         }
     }
 }
@@ -84,6 +86,14 @@ actor HistoryDataStore {
     func deleteRecords(deviceID: String) throws {
         try modelContext.delete(model: HistoryRecord.self,
                                 where: #Predicate { $0.deviceID == deviceID })
+        try modelContext.save()
+    }
+
+    /// Wipes the cache for **every** device. Used when the firmware's log-record
+    /// version changes: records written under an older record layout carry
+    /// different semantics and cannot be mixed with v2 rows (§2).
+    func deleteAllRecords() throws {
+        try modelContext.delete(model: HistoryRecord.self)
         try modelContext.save()
     }
 
@@ -158,10 +168,17 @@ actor HistoryDataStore {
             .sorted { $0.date < $1.date }
     }
 
+    /// Streams the device's records into a CSV file and returns its URL. Each
+    /// export writes into its own unique subdirectory, so a new export can never
+    /// delete a file a still-open share sheet is reading (the earlier version
+    /// wiped the whole export folder every call — an intermittent-failure race).
+    /// Exports older than an hour are cleaned up opportunistically instead.
     func exportCSV(deviceID: String, cutoff: Date?, filename: String) throws -> URL {
-        let exportDir = FileManager.default.temporaryDirectory
+        let root = FileManager.default.temporaryDirectory
             .appending(path: "HistoryExports", directoryHint: .isDirectory)
-        try? FileManager.default.removeItem(at: exportDir)
+        Self.cleanUpStaleExports(in: root)
+
+        let exportDir = root.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
 
         let fileURL = exportDir.appending(path: filename)
@@ -176,7 +193,11 @@ actor HistoryDataStore {
         localFormatter.locale = Locale(identifier: "en_US_POSIX")
         localFormatter.timeZone = .current
 
-        let header = "timestamp_utc,timestamp_local,device_id,sequence,temperature_c,temperature_f,humidity_pct,tvoc_ppb,eco2_ppm,aqi,aqi_label,pm1_ugm3,pm25_ugm3,pm10_ugm3,status_hex,aht21_init,aht21_read_ok,ens160_init,can_online,pm_measuring,ionizer_healthy,ionizer_on\r\n"
+        // Column order follows the log-record v2 field order on the wire (§1.2):
+        // timestamp, temperature, humidity, VOC, NOx, CO2, PM1/2.5/4/10, aq_class,
+        // status, sequence. Derived columns (local time, °F, labels, decoded status
+        // bits) sit immediately after the field they are derived from.
+        let header = "timestamp_utc,timestamp_local,device_id,temperature_c,temperature_f,humidity_pct,voc_index,nox_index,co2_ppm,pm1_ugm3,pm25_ugm3,pm4_ugm3,pm10_ugm3,aq_class,aq_label,status_hex,sen66_present,fresh,sen66_warming,can_online,sen66_sticky_error,ionizer_healthy,ionizer_on,sequence\r\n"
 
         let handle = try FileHandle(forWritingTo: fileURL)
         defer { try? handle.close() }
@@ -205,29 +226,35 @@ actor HistoryDataStore {
             var csvLines = ""
             for record in chunk {
                 let tempF = record.temperatureC.map { $0 * 9 / 5 + 32 }
+                let status = record.deviceStatus
+                func decimal(_ value: Double?, _ places: Int) -> String {
+                    value.map { String(format: "%.\(places)f", $0) } ?? ""
+                }
                 let fields: [String] = [
                     utcFormatter.string(from: record.timestamp),
                     localFormatter.string(from: record.timestamp),
                     record.deviceID,
-                    String(record.sequence),
-                    record.temperatureC.map { String(format: "%.1f", $0) } ?? "",
-                    tempF.map { String(format: "%.1f", $0) } ?? "",
-                    record.humidityPct.map { String(format: "%.1f", $0) } ?? "",
-                    record.tvocPpb.map(String.init) ?? "",
-                    record.eco2Ppm.map(String.init) ?? "",
-                    String(record.aqi),
-                    record.aqiLevel.label,
-                    record.pm1.map(String.init) ?? "",
-                    record.pm25.map(String.init) ?? "",
-                    record.pm10.map(String.init) ?? "",
+                    decimal(record.temperatureC, 2),
+                    decimal(tempF, 2),
+                    decimal(record.humidityPct, 2),
+                    decimal(record.vocIndex, 1),
+                    decimal(record.noxIndex, 1),
+                    decimal(record.co2Ppm, 0),
+                    decimal(record.pm1, 1),
+                    decimal(record.pm25, 1),
+                    decimal(record.pm4, 1),
+                    decimal(record.pm10, 1),
+                    String(record.aqClass),
+                    record.aqClassLabel,
                     String(format: "0x%02X", record.status),
-                    String(record.deviceStatus.indicators[0].isOn ? 1 : 0),
-                    String(record.deviceStatus.indicators[1].isOn ? 1 : 0),
-                    String(record.deviceStatus.indicators[2].isOn ? 1 : 0),
-                    String(record.deviceStatus.indicators[3].isOn ? 1 : 0),
-                    String(record.deviceStatus.indicators[4].isOn ? 1 : 0),
-                    String(record.deviceStatus.ionizerIsHealthy ? 1 : 0),
-                    String(record.deviceStatus.ionizerIsOn ? 1 : 0)
+                    String(status.sen66Present ? 1 : 0),
+                    String(status.isFresh ? 1 : 0),
+                    String(status.sen66Warming ? 1 : 0),
+                    String(status.twaiOnline ? 1 : 0),
+                    String(status.sen66StickyError ? 1 : 0),
+                    String(status.ionizerIsHealthy ? 1 : 0),
+                    String(status.ionizerIsOn ? 1 : 0),
+                    String(record.sequence)
                 ]
                 csvLines += fields.joined(separator: ",") + "\r\n"
             }
@@ -241,5 +268,19 @@ actor HistoryDataStore {
         }
 
         return fileURL
+    }
+
+    /// Best-effort removal of past export subdirectories old enough that no
+    /// share sheet can still be reading from them.
+    private static func cleanUpStaleExports(in root: URL) {
+        let fm = FileManager.default
+        guard let children = try? fm.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        let staleBefore = Date().addingTimeInterval(-3_600)
+        for child in children {
+            let modified = (try? child.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate) ?? .distantPast
+            if modified < staleBefore { try? fm.removeItem(at: child) }
+        }
     }
 }

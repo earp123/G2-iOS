@@ -10,7 +10,10 @@ import Foundation
 /// A scan result, keyed by `peripheral.identifier` and updated in place (§5).
 struct DiscoveredDevice: Identifiable, Equatable, Sendable {
     let id: UUID
-    let name: String
+    /// Advertised local name, refreshed on every advertisement — a unit renamed
+    /// through the Device Name characteristic re-advertises under the new name,
+    /// so this is `var` rather than fixed at first discovery (§2).
+    var name: String
     var rssi: Int
 
     /// Last 4 of the identifier UUID, used to disambiguate same-named units (§5).
