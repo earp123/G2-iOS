@@ -224,9 +224,13 @@ struct ThresholdsEditor: View {
         }
         .onChange(of: bluetooth.thresholdsRevision) { _, _ in loadFromDevice() }
         .toolbar {
+            // Number pads have no return key. Shown only while a threshold cell
+            // has focus, so the device-name field's keyboard is left alone.
             ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button("Done") { focusedField = nil }
+                if focusedField != nil {
+                    Spacer()
+                    Button("Done") { focusedField = nil }
+                }
             }
         }
         .confirmationDialog("Restore default thresholds?", isPresented: $showRestoreConfirm,

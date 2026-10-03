@@ -6,10 +6,11 @@
 //  thresholds v3)**.
 //
 //  ⚠️ SOURCE OF TRUTH — these values mirror firmware branch `SEN66` of
-//  earp123/G2-Air-Quality-Monitor: `docs/thresholds-v3.md` §2 for everything v3
-//  changed, and `docs/sen66-migration.md` §6 / `docs/gatt-v2-ios-notes.md`
-//  (firmware commit 18746cd) for everything it left alone. Where they disagree,
-//  thresholds-v3 wins. Do NOT change, guess, or "improve" any UUID, opcode, byte
+//  earp123/G2-Air-Quality-Monitor: `docs/thresholds-v3.md` §2 and the iOS
+//  handoff note `docs/gatt-v3-ios-notes.md` for everything v3 changed, and
+//  `docs/sen66-migration.md` §6 / `docs/gatt-v2-ios-notes.md` (firmware commit
+//  18746cd) for everything it left alone. Where they disagree, the v3 documents
+//  win. Do NOT change, guess, or "improve" any UUID, opcode, byte
 //  offset, scaling factor, or sentinel. If a value is missing here, ask before
 //  assuming.
 //
