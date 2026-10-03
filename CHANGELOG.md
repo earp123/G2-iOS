@@ -76,10 +76,12 @@ hysteresis 0.
   rule in the firmware's order: version 1; each gas row strictly increasing with
   C4 ≤ 500 / 500 / 40000; PM attention < hazard; every fan % ≤ 100; delay ≤
   3600 s; run-on ≤ 1440 min; each gas hysteresis below that row's smallest
-  adjacent-edge gap; PM hysteresis below the narrowest hazard − attention band.
-  No lower bound on any edge (C1 may be 0), exactly as firmware — the app is
-  never stricter than the device. `validationErrors()` lists them all for the
-  inline errors.
+  adjacent-edge gap; PM hysteresis below the narrowest hazard − attention band;
+  and — firmware's one rule beyond the task text — a non-zero hysteresis below
+  the lowest edge (C1 per gas, the smallest attention edge for PM), since
+  otherwise the class could never step back to 1. No lower bound on any edge
+  (C1 may be 0), exactly as firmware — the app is never stricter than the
+  device. `validationErrors()` lists them all for the inline errors.
 - **Two class tiles** on the Dashboard — gas and PM, coloured like the device's
   LEDs (gas 0 grey, 1–2 green, 3 orange, 4–5 red; PM 0 grey, 1 green, 2 orange,
   3 red). History rows show two class dots and the record detail two tiles.
@@ -135,18 +137,23 @@ rejection cases, first-failure order), **ThresholdsFormTests** (input rules,
 split and tile colours), **FanModeTests** (wire 1 → Auto with the assertion
 hook), plus Device Info guard 3 / 3 vs 2 / 2 and opcode `0x10`.
 
-**Not yet built or run in Xcode.** This change was made without access to a Mac
-or a Swift toolchain. Verified instead: every Swift file parses cleanly with a
-tree-sitter Swift grammar (the pre-change tree also parses cleanly, as a
-baseline); the golden vectors were recomputed independently from the firmware
-byte table and checked against firmware's own default-blob hex; and every
-expectation in the new and updated tests was evaluated against a line-for-line
-Python port of the blob, form, class-byte, Settings and Device Info logic (0
-failures). **Before shipping:** build in Xcode 26 (Swift 6, strict
-concurrency), run `G2-iOSTests`, and run the bench acceptance in
+**Verified on a Linux Swift 6.2.4 toolchain — not yet in Xcode.** The
+Foundation-level app code (models, parsers, `GATT`, `ThresholdsBlob`, the
+`ThresholdsForm` input rules, `DeviceNameRules`) and the **real
+`BluetoothManager.swift`** — device and Simulator paths both — were compiled as
+a SwiftPM package with this target's settings (Swift 6, default actor isolation
+MainActor, approachable concurrency, member import visibility) against a
+CoreBluetooth stand-in that keeps the SDK's non-Sendable class shapes: **zero
+errors, zero warnings**. The whole `G2-iOSTests` suite ran under Swift Testing:
+**120 tests in 10 suites pass**. The off-default Thresholds vector is also
+accepted by the firmware's own `thresholds_validate()` and round-trips through
+its `thresholds_pack()/unpack()` byte for byte. SwiftUI views, SwiftData
+(`HistoryRecord` / `HistoryDataStore`) and `MockHistoryRepository` cannot build
+off Apple platforms and were reviewed by hand. **Before shipping:** build in
+Xcode 26, run `G2-iOSTests`, and run the bench acceptance in
 `docs/thresholds-v3.md` §4 against a 3 / 3 unit. No app-allowed value that
-firmware would reject is known (§4 item 6): `validate()` was written against
-the firmware's `thresholds_validate()`.
+firmware would reject is known (§4 item 6): `validate()` mirrors the firmware's
+`thresholds_validate()`, including its hysteresis floor.
 
 ---
 

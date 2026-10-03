@@ -130,7 +130,8 @@ struct ThresholdsFormTests {
             (.fanDownDelay, "3601", .fanDownDelay),
             (.ionizerRunOn, "1441", .ionizerRunOn),
             (.hysteresis(.voc), "50", .hysteresis(.voc)),       // smallest VOC gap is 50
-            (.hysteresisPM, "18.0", .hysteresisPM),             // narrowest PM band is 18.0
+            (.hysteresis(.nox), "20", .hysteresis(.nox)),       // NOx C1 is 20 (gap 30)
+            (.hysteresisPM, "7.0", .hysteresisPM),              // lowest PM attention is 7.0
         ]
         for (field, text, row) in cases {
             var form = ThresholdsForm(.defaults)

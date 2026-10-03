@@ -183,7 +183,9 @@ enum GoldenVectors {
     ]
 
     /// Every field off its default and distinct, with high bytes exercised, so a
-    /// swapped or shifted offset cannot pass. Valid against every §2.2 rule.
+    /// swapped or shifted offset cannot pass. Valid against every §2.2 rule and
+    /// firmware's hysteresis floor (non-zero hysteresis below C1 / the smallest
+    /// attention edge).
     static let thresholdsNonDefaultPayload: [UInt8] = [
         0x01, 0x00,                                         // 0 version 1 · 1 reserved
         0x05, 0x00, 0x10, 0x00, 0x1B, 0x00, 0x26, 0x00,     // 2–9   VOC    5 /   16 /   27 /    38
@@ -191,15 +193,15 @@ enum GoldenVectors {
         0x90, 0x01, 0xB0, 0x04, 0x88, 0x13, 0x40, 0x9C,     // 18–25 CO2  400 / 1200 / 5000 / 40000
         0x33, 0x00, 0x7B, 0x00,                             // 26–29 PM1   5.1 /  12.3
         0x64, 0x00, 0x2B, 0x02,                             // 30–33 PM2.5 10.0 / 55.5
-        0x00, 0x00, 0xD0, 0x07,                             // 34–37 PM10  0.0 / 200.0
+        0x3C, 0x00, 0xD0, 0x07,                             // 34–37 PM10  6.0 / 200.0
         0x0A, 0x14, 0x1E, 0x28, 0x64,                       // 38–42 fan % gas 10 / 20 / 30 / 40 / 100
         0x00, 0x3C, 0x63,                                   // 43–45 fan % PM 0 / 60 / 99
         0x10, 0x0E,                                         // 46–47 fan-down delay 3600 s
         0xA0, 0x05,                                         // 48–49 ionizer run-on 1440 min
-        0x0A, 0x00,                                         // 50–51 hysteresis VOC 10 (smallest gap 11)
-        0x1D, 0x00,                                         // 52–53 hysteresis NOx 29 (smallest gap 30)
-        0x1F, 0x03,                                         // 54–55 hysteresis CO2 799 (smallest gap 800)
-        0x47, 0x00,                                         // 56–57 hysteresis PM 7.1 (narrowest band 7.2)
+        0x04, 0x00,                                         // 50–51 hysteresis VOC 4 (C1 5, smallest gap 11)
+        0x09, 0x00,                                         // 52–53 hysteresis NOx 9 (C1 10, smallest gap 30)
+        0x8F, 0x01,                                         // 54–55 hysteresis CO2 399 (C1 400, smallest gap 800)
+        0x32, 0x00,                                         // 56–57 hysteresis PM 5.0 (lowest attention 5.1, narrowest band 7.2)
         0x00, 0x00,                                         // 58–59 reserved
     ]
 }

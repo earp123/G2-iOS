@@ -247,10 +247,14 @@ nonisolated struct ThresholdsBlob: Equatable, Sendable {
         case edgeAboveMax(GasChannel, max: UInt16)
         /// Hysteresis is not below the smallest gap between adjacent edges.
         case hysteresisTooLarge(GasChannel, smallestGap: UInt16)
+        /// Non-zero hysteresis is not below C1, so class 1 could never return.
+        case hysteresisNotBelowFirstEdge(GasChannel, c1: UInt16)
         /// Attention is not below hazard for this PM channel.
         case attentionNotBelowHazard(PMChannel)
         /// PM hysteresis (×10) is not below the narrowest hazard − attention band.
         case pmHysteresisTooLarge(smallestBand: UInt16)
+        /// Non-zero PM hysteresis (×10) is not below the smallest attention edge.
+        case pmHysteresisNotBelowAttention(smallestAttention: UInt16)
         /// Fan % above 100 for gas class 1…5.
         case fanGasAboveMax(gasClass: Int)
         /// Fan % above 100 for PM class 1…3.
@@ -279,9 +283,11 @@ nonisolated struct ThresholdsBlob: Equatable, Sendable {
             case .unsupportedVersion:                 .version
             case .edgesNotIncreasing(let channel),
                  .edgeAboveMax(let channel, _):       .gasEdges(channel)
-            case .hysteresisTooLarge(let channel, _): .hysteresis(channel)
+            case .hysteresisTooLarge(let channel, _),
+                 .hysteresisNotBelowFirstEdge(let channel, _): .hysteresis(channel)
             case .attentionNotBelowHazard(let channel): .pmEdges(channel)
-            case .pmHysteresisTooLarge:               .hysteresisPM
+            case .pmHysteresisTooLarge,
+                 .pmHysteresisNotBelowAttention:      .hysteresisPM
             case .fanGasAboveMax:                     .fanGas
             case .fanPMAboveMax:                      .fanPM
             case .fanDownDelayAboveMax:               .fanDownDelay
@@ -301,11 +307,16 @@ nonisolated struct ThresholdsBlob: Equatable, Sendable {
                 "\(channel.title) C4 must be \(max) or less."
             case .hysteresisTooLarge(let channel, let gap):
                 "\(channel.title) hysteresis must be below \(gap) — the smallest gap between its edges."
+            case .hysteresisNotBelowFirstEdge(let channel, let c1):
+                "\(channel.title) hysteresis must be 0 or below C1 (\(c1)), or the class could never return to 1."
             case .attentionNotBelowHazard(let channel):
                 "\(channel.title) attention must be below hazard."
             case .pmHysteresisTooLarge(let band):
                 "PM hysteresis must be below \(ThresholdsBlob.tenthsText(band)) µg/m³ — "
                     + "the narrowest attention-to-hazard band."
+            case .pmHysteresisNotBelowAttention(let attention):
+                "PM hysteresis must be 0 or below \(ThresholdsBlob.tenthsText(attention)) µg/m³ — "
+                    + "the lowest attention edge — or PM could never return to good."
             case .fanGasAboveMax(let gasClass):
                 "Fan for gas class \(gasClass) must be \(GATT.thresholdsFanPercentMax) % or less."
             case .fanPMAboveMax(let pmClass):
@@ -327,12 +338,13 @@ nonisolated struct ThresholdsBlob: Equatable, Sendable {
     /// Every rule the blob breaks, in firmware's check order (so `.first` is the
     /// one firmware would log). The editor shows them all at once, inline.
     ///
-    /// Rules (§2.2), and nothing beyond them:
+    /// Rules (§2.2, plus firmware's hysteresis floor — gatt-v3 notes §6):
     ///  • version == 1
     ///  • per gas: C1 < C2 < C3 < C4; C4 ≤ 500 (VOC, NOx) / 40000 (CO2);
-    ///    hysteresis < the smallest adjacent-edge gap
+    ///    hysteresis < the smallest adjacent-edge gap, and 0 or < C1
     ///  • per PM channel: attention < hazard
-    ///  • PM hysteresis < the smallest (hazard − attention) of PM1 / PM2.5 / PM10
+    ///  • PM hysteresis < the smallest (hazard − attention) of PM1 / PM2.5 / PM10,
+    ///    and 0 or < the smallest attention edge
     ///  • every fan % ≤ 100; fan-down delay ≤ 3600 s; ionizer run-on ≤ 1440 min
     /// There is no lower bound on any edge — C1 may be 0 — and reserved bytes are
     /// not checked (firmware ignores them).
@@ -359,6 +371,10 @@ nonisolated struct ThresholdsBlob: Equatable, Sendable {
                hysteresis(channel) >= gap {
                 errors.append(.hysteresisTooLarge(channel, smallestGap: gap))
             }
+            if increasing, let c1 = edge.first,
+               hysteresis(channel) != 0, hysteresis(channel) >= c1 {
+                errors.append(.hysteresisNotBelowFirstEdge(channel, c1: c1))
+            }
         }
 
         var pmPairsValid = true
@@ -370,6 +386,11 @@ nonisolated struct ThresholdsBlob: Equatable, Sendable {
            let band = PMChannel.allCases.map({ hazard($0) - attention($0) }).min(),
            hysteresisPM >= band {
             errors.append(.pmHysteresisTooLarge(smallestBand: band))
+        }
+        if pmPairsValid,
+           let attention = PMChannel.allCases.map({ self.attention($0) }).min(),
+           hysteresisPM != 0, hysteresisPM >= attention {
+            errors.append(.pmHysteresisNotBelowAttention(smallestAttention: attention))
         }
 
         for (i, pct) in fanGasTable.enumerated() where pct > GATT.thresholdsFanPercentMax {

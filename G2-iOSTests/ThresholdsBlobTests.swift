@@ -25,15 +25,15 @@ struct ThresholdsBlobTests {
         co2Edges: [400, 1200, 5000, 40000],
         pm1Attention: 51, pm1Hazard: 123,
         pm25Attention: 100, pm25Hazard: 555,
-        pm10Attention: 0, pm10Hazard: 2000,
+        pm10Attention: 60, pm10Hazard: 2000,
         fanGas: [10, 20, 30, 40, 100],
         fanPM: [0, 60, 99],
         fanDownDelaySeconds: 3600,
         ionizerRunOnMinutes: 1440,
-        hysteresisVOC: 10,
-        hysteresisNOx: 29,
-        hysteresisCO2: 799,
-        hysteresisPM: 71
+        hysteresisVOC: 4,
+        hysteresisNOx: 9,
+        hysteresisCO2: 399,
+        hysteresisPM: 50
     )
 
     // MARK: - Golden vectors
@@ -284,15 +284,39 @@ struct ThresholdsBlobTests {
         #expect(blob.validate() == nil)
     }
 
-    @Test("Default edges allow hysteresis up to gap − 1 per gas", arguments: [
-        (ThresholdsBlob.GasChannel.voc, UInt16(50)), (.nox, 30), (.co2, 200),
+    @Test("Default edges allow hysteresis up to min(gap, C1) − 1 per gas", arguments: [
+        (ThresholdsBlob.GasChannel.voc, UInt16(50), UInt16(100)), (.nox, 30, 20), (.co2, 200, 800),
     ])
-    func defaultGaps(channel: ThresholdsBlob.GasChannel, gap: UInt16) {
+    func defaultGaps(channel: ThresholdsBlob.GasChannel, gap: UInt16, c1: UInt16) {
         var blob = ThresholdsBlob.defaults
-        setHysteresis(&blob, channel, gap - 1)
+        let limit = min(gap, c1)
+        setHysteresis(&blob, channel, limit - 1)
         #expect(blob.validate() == nil)
-        setHysteresis(&blob, channel, gap)
-        #expect(blob.validate() == .hysteresisTooLarge(channel, smallestGap: gap))
+        setHysteresis(&blob, channel, limit)
+        #expect(blob.validate() == (gap <= c1
+            ? .hysteresisTooLarge(channel, smallestGap: gap)
+            : .hysteresisNotBelowFirstEdge(channel, c1: c1)))
+    }
+
+    @Test("Non-zero gas hysteresis must stay below C1, or class 1 could never return",
+          arguments: ThresholdsBlob.GasChannel.allCases)
+    func gasHysteresisBelowFirstEdge(channel: ThresholdsBlob.GasChannel) {
+        var blob = ThresholdsBlob.defaults
+        // Wide gaps so only the C1 floor can bite: C1 30, then 100-wide steps.
+        blob[.gasEdge(channel, 0)] = 30
+        blob[.gasEdge(channel, 1)] = 130
+        blob[.gasEdge(channel, 2)] = 230
+        blob[.gasEdge(channel, 3)] = 330
+        setHysteresis(&blob, channel, 29)
+        #expect(blob.validate() == nil)
+        setHysteresis(&blob, channel, 30)
+        #expect(blob.validate() == .hysteresisNotBelowFirstEdge(channel, c1: 30))
+        // C1 = 0 still allows hysteresis 0, and only 0.
+        blob[.gasEdge(channel, 0)] = 0
+        setHysteresis(&blob, channel, 0)
+        #expect(blob.validate() == nil)
+        setHysteresis(&blob, channel, 1)
+        #expect(blob.validate() == .hysteresisNotBelowFirstEdge(channel, c1: 0))
     }
 
     @Test("A row that is out of order reports the ordering error, not a hysteresis one")
@@ -320,7 +344,10 @@ struct ThresholdsBlobTests {
     @Test("PM hysteresis must stay below the narrowest hazard − attention band")
     func pmHysteresis() {
         var blob = ThresholdsBlob.defaults
-        // Default bands: PM1 25.0−7.0 = 18.0, PM2.5 26.0, PM10 105.0 → 18.0 (180).
+        // Raise PM1/PM2.5 attention so only the band rule can bite: bands PM1
+        // 38.0−20.0 = 18.0, PM2.5 30.0, PM10 105.0 → 18.0 (180); lowest attention 20.0.
+        blob.pm1Attention = 200;  blob.pm1Hazard = 380
+        blob.pm25Attention = 200; blob.pm25Hazard = 500
         blob.hysteresisPM = 179
         #expect(blob.validate() == nil)
         blob.hysteresisPM = 180
@@ -332,6 +359,23 @@ struct ThresholdsBlobTests {
         #expect(blob.validate() == nil)
         blob.hysteresisPM = 20
         #expect(blob.validate() == .pmHysteresisTooLarge(smallestBand: 20))
+    }
+
+    @Test("Non-zero PM hysteresis must stay below the lowest attention edge")
+    func pmHysteresisBelowAttention() {
+        var blob = ThresholdsBlob.defaults
+        // Defaults: lowest attention is PM1's 7.0 (70), narrowest band 18.0.
+        blob.hysteresisPM = 69
+        #expect(blob.validate() == nil)
+        blob.hysteresisPM = 70
+        #expect(blob.validate() == .pmHysteresisNotBelowAttention(smallestAttention: 70))
+        blob.hysteresisPM = 100         // the review's case: PM would stick at attention
+        #expect(blob.validate() == .pmHysteresisNotBelowAttention(smallestAttention: 70))
+        blob.pm10Attention = 0          // attention 0 allows hysteresis 0 only
+        blob.hysteresisPM = 0
+        #expect(blob.validate() == nil)
+        blob.hysteresisPM = 1
+        #expect(blob.validate() == .pmHysteresisNotBelowAttention(smallestAttention: 0))
     }
 
     @Test("A broken PM pair reports the pair, not a hysteresis error")
